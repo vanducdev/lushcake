@@ -1,0 +1,75 @@
+name: Build macOS
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Tạo GitHub Release?'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-mac-arm64:
+    runs-on: macos-14  # Máy ảo Apple Silicon (M1/M2/M3) của GitHub
+    timeout-minutes: 30
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js 22.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: 📦 Build macOS DMG (Apple Silicon)
+        run: npx electron-builder --mac --arm64 --publish never
+
+      - name: 📤 Upload DMG as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LushCake-macOS-arm64
+          path: dist-electron-build/*.dmg
+          if-no-files-found: error
+
+      - name: 🏷️ Xác định tag name
+        id: get_tag
+        if: github.event_name == 'push' || github.event.inputs.publish == 'true'
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          else
+            VERSION=$(node -p "require('./package.json').version")
+            echo "tag=v${VERSION}" >> $GITHUB_OUTPUT
+          fi
+          echo "Tag: $(grep '^tag=' $GITHUB_OUTPUT | cut -d= -f2)"
+
+      - name: 🚀 Publish .dmg lên GitHub Releases
+        if: github.event_name == 'push' || github.event.inputs.publish == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.get_tag.outputs.tag }}
+          name: "LushCake ${{ steps.get_tag.outputs.tag }}"
+          files: |
+            dist-electron-build/*.dmg
+            dist-electron-build/*.blockmap
+            dist-electron-build/latest-mac.yml
+          token: ${{ secrets.GITHUB_TOKEN }}
+          draft: false
+          prerelease: false
+          make_latest: true
+          fail_on_unmatched_files: false
