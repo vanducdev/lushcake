@@ -153,8 +153,7 @@
           ]
         }
       ],
-      "icon": "resources/icons/icon.ico",
-      "signAndEditExecutable": false
+      "icon": "resources/icons/icon.ico"
     },
     "protocols": {
       "name": "LushCake Deep Link",
@@ -167,6 +166,9 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "allowElevation": true,
+      "installerIcon": "resources/icons/icon.ico",
+      "uninstallerIcon": "resources/icons/icon.ico",
+      "installerHeaderIcon": "resources/icons/icon.ico",
       "artifactName": "${productName}-Setup-${version}.${ext}",
       "perMachine": false,
       "deleteAppDataOnUninstall": false
