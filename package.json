@@ -100,7 +100,7 @@
     "appId": "com.LushCake.app",
     "productName": "LushCake",
     "forceCodeSigning": false,
-    "npmRebuild": false,
+    "npmRebuild": true,
     "publish": [],
     "extraResources": [
       {
@@ -193,7 +193,8 @@
       "icon": "resources/icons/icon.icns",
       "category": "public.app-category.social-networking",
       "hardenedRuntime": false,
-      "gatekeeperAssess": false
+      "gatekeeperAssess": false,
+      "identity": null
     },
     "dmg": {
       "title": "LushCake"
