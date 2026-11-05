@@ -1,0 +1,377 @@
+"use strict";
+/**
+ * LibraryHandler - REST API cho thư viện media.
+ * Các endpoint /api/library/* được HttpRelayService gọi.
+ */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.libraryHandlers = void 0;
+const fs = __importStar(require("fs"));
+const LibraryService_1 = __importDefault(require("../../library/LibraryService"));
+const DatabaseService_1 = __importDefault(require("../../database/DatabaseService"));
+const Logger_1 = __importDefault(require("../../../utils/Logger"));
+const lib = () => LibraryService_1.default.getInstance();
+function parseOwnerZaloIds(value) {
+    if (Array.isArray(value))
+        return value.map(String).filter(Boolean);
+    if (typeof value !== 'string' || !value)
+        return [];
+    try {
+        const parsed = JSON.parse(value);
+        if (Array.isArray(parsed))
+            return parsed.map(String).filter(Boolean);
+    }
+    catch { }
+    return value.split(',').filter(Boolean);
+}
+function resolveAccessibleOwners(employee, zaloId, requested) {
+    const assigned = new Set((employee.assigned_accounts || []).map(String));
+    if (assigned.size === 0)
+        return requested.length > 0 ? requested : [zaloId];
+    if (requested.length === 0)
+        return assigned.has(zaloId) ? [zaloId] : null;
+    const allowed = requested.filter(id => assigned.has(id));
+    return allowed.length > 0 ? allowed : null;
+}
+function success(data, pagination) {
+    const res = { success: true };
+    if (data !== undefined)
+        res.data = data;
+    if (pagination)
+        res.pagination = pagination;
+    return res;
+}
+function error(msg) {
+    return { success: false, error: msg };
+}
+exports.libraryHandlers = {
+    // ── Upload (multipart) ──────────────────────────────────────────
+    // Boss nhận multipart từ employee (gửi qua curl, HTTP client, ...)
+    handleUpload(req, res, employee) {
+        const contentType = req.headers['content-type'] || '';
+        if (!contentType.includes('multipart/form-data')) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(error('Expected multipart/form-data')));
+            return;
+        }
+        const boundary = '--' + contentType.split('boundary=')[1];
+        if (!boundary) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(error('Missing boundary')));
+            return;
+        }
+        // Capture pinned DB path BEFORE async callback (same as handleUploadJson)
+        const pinnedDbPath = DatabaseService_1.default.getInstance().getDbPath();
+        const chunks = [];
+        req.on('data', (chunk) => chunks.push(chunk));
+        req.on('end', async () => {
+            try {
+                const raw = Buffer.concat(chunks);
+                const parsed = this.parseMultipart(raw, boundary);
+                const fileField = parsed.files?.[0];
+                if (!fileField || !fileField.data || fileField.data.length === 0) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(error('No file uploaded')));
+                    return;
+                }
+                const zaloId = parsed.fields?.zaloId || employee.assigned_accounts?.[0] || '';
+                const employeeId = employee.employee_id || '';
+                const tags = parsed.fields?.tags || '';
+                const folderId = parsed.fields?.folderId ? parseInt(parsed.fields.folderId) : null;
+                const item = await DatabaseService_1.default.getInstance().withDbPathAsync(pinnedDbPath, () => lib().upload({
+                    zaloId,
+                    buffer: fileField.data,
+                    fileName: fileField.filename || 'unnamed',
+                    mimeType: fileField.mimeType || 'application/octet-stream',
+                    employeeId,
+                    tags,
+                    folderId,
+                }));
+                // Build URLs
+                const bossUrl = `//${req.headers.host || ''}`;
+                const fileUrl = `${bossUrl}/api/library/file/${item.uuid}`;
+                const thumbUrl = item.thumb_path ? `${bossUrl}/api/library/thumb/${item.uuid}` : null;
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(success({
+                    ...item,
+                    file_path: undefined,
+                    thumb_path: undefined,
+                    fileUrl,
+                    thumbUrl,
+                })));
+            }
+            catch (err) {
+                Logger_1.default.error(`[LibraryHandler] Upload error: ${err.message}`);
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(error(err.message)));
+            }
+        });
+    },
+    // ── Upload (JSON base64 - employee mode) ────────────────────────
+    // Employee gửi POST /api/library/upload/json với JSON body:
+    // { zaloId, fileName, mimeType, base64, tags?, folderId? }
+    handleUploadJson(req, res, employee) {
+        // ⚠️ Capture pinned DB path BEFORE async callback. handleRestApi wraps this in
+        // runOnPinnedDb which swaps db. When req.on('end') fires later the context is gone.
+        const pinnedDbPath = DatabaseService_1.default.getInstance().getDbPath();
+        const chunks = [];
+        req.on('data', (chunk) => chunks.push(chunk));
+        req.on('end', async () => {
+            try {
+                const body = Buffer.concat(chunks).toString('utf8');
+                const parsed = JSON.parse(body);
+                const { zaloId, fileName, mimeType, base64, tags, folderId } = parsed;
+                if (!base64) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(error('Missing base64')));
+                    return;
+                }
+                const buffer = Buffer.from(base64, 'base64');
+                if (buffer.length === 0) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(error('Empty file data')));
+                    return;
+                }
+                const empZaloId = zaloId || employee.assigned_accounts?.[0] || '';
+                // ⚠️ Dùng withDbPathAsync vì lib().upload() là async (có await sharp bên trong).
+                // withDbPath (sync) sẽ restore db BEFORE async ops complete → INSERT vào sai DB!
+                const item = await DatabaseService_1.default.getInstance().withDbPathAsync(pinnedDbPath, () => lib().upload({
+                    zaloId: empZaloId,
+                    buffer,
+                    fileName: fileName || 'unnamed',
+                    mimeType: mimeType || 'application/octet-stream',
+                    employeeId: employee.employee_id || '',
+                    tags: tags || '',
+                    folderId: folderId ? parseInt(folderId) : null,
+                }));
+                // Build URLs using request host
+                const bossUrl = `//${req.headers.host || ''}`;
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(success({
+                    ...item,
+                    file_path: undefined,
+                    thumb_path: undefined,
+                    fileUrl: `${bossUrl}/api/library/file/${item.uuid}`,
+                    thumbUrl: item.thumb_path ? `${bossUrl}/api/library/thumb/${item.uuid}` : null,
+                })));
+            }
+            catch (err) {
+                Logger_1.default.error(`[LibraryHandler] handleUploadJson error: ${err.message}`);
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(error(err.message)));
+            }
+        });
+    },
+    // ── Query ───────────────────────────────────────────────────────
+    getItems(employee, params) {
+        const zaloId = params.zaloId || employee.assigned_accounts?.[0] || '';
+        if (!zaloId)
+            return error('Missing zaloId');
+        const requestedOwners = parseOwnerZaloIds(params.ownerZaloIds);
+        const ownerZaloIds = resolveAccessibleOwners(employee, zaloId, requestedOwners);
+        if (!ownerZaloIds)
+            return error('Không có quyền xem thư viện của trang này');
+        const page = parseInt(params.page) || 1;
+        const limit = Math.min(parseInt(params.limit) || 50, 200);
+        const result = lib().getItems({
+            zaloId,
+            ownerZaloIds,
+            type: params.type || params.type,
+            search: params.search,
+            folderId: params.folderId !== undefined ? parseInt(params.folderId) : undefined,
+            page,
+            limit,
+        });
+        return success(result.items.map(item => ({
+            ...item,
+            file_path: undefined,
+            thumb_path: undefined,
+            fileUrl: params._bossUrl
+                ? `${params._bossUrl}/api/library/file/${item.uuid}`
+                : `/api/library/file/${item.uuid}`,
+            thumbUrl: item.thumb_path
+                ? (params._bossUrl
+                    ? `${params._bossUrl}/api/library/thumb/${item.uuid}`
+                    : `/api/library/thumb/${item.uuid}`)
+                : null,
+            _localPath: item.file_path,
+            _thumbLocalPath: item.thumb_path,
+        })), { page, limit, total: result.total, hasMore: page * limit < result.total });
+    },
+    getItem(employee, params) {
+        if (!params.uuid)
+            return error('Missing uuid');
+        const item = lib().getItem(params.uuid);
+        if (!item)
+            return error('Item not found');
+        const bossUrl = params._bossUrl || '';
+        return success({
+            ...item,
+            file_path: undefined,
+            thumb_path: undefined,
+            fileUrl: bossUrl
+                ? `${bossUrl}/api/library/file/${item.uuid}`
+                : `/api/library/file/${item.uuid}`,
+            thumbUrl: item.thumb_path
+                ? (bossUrl
+                    ? `${bossUrl}/api/library/thumb/${item.uuid}`
+                    : `/api/library/thumb/${item.uuid}`)
+                : null,
+            _localPath: item.file_path,
+            _thumbLocalPath: item.thumb_path,
+        });
+    },
+    updateItem(employee, params) {
+        if (!params.uuid)
+            return error('Missing uuid');
+        lib().updateItem(params.uuid, params);
+        return success({ uuid: params.uuid });
+    },
+    deleteItem(employee, params) {
+        if (!params.uuid)
+            return error('Missing uuid');
+        lib().deleteItem(params.uuid);
+        return success({ uuid: params.uuid });
+    },
+    // ── Folders ─────────────────────────────────────────────────────
+    createFolder(employee, params) {
+        const zaloId = params.zaloId || employee.assigned_accounts?.[0] || '';
+        if (!zaloId)
+            return error('Missing zaloId');
+        if (!params.name)
+            return error('Missing name');
+        const id = lib().createFolder({
+            name: params.name,
+            zaloId,
+            parentId: params.parentId ? parseInt(params.parentId) : null,
+            color: params.color,
+            type: params.type,
+        });
+        return success({ id });
+    },
+    getFolders(employee, params) {
+        const zaloId = params.zaloId || employee.assigned_accounts?.[0] || '';
+        if (!zaloId)
+            return error('Missing zaloId');
+        const requestedOwners = parseOwnerZaloIds(params.ownerZaloIds);
+        const ownerZaloIds = resolveAccessibleOwners(employee, zaloId, requestedOwners);
+        if (!ownerZaloIds)
+            return error('Không có quyền xem thư viện của trang này');
+        const folders = lib().getFolders(zaloId, params.type, ownerZaloIds);
+        return success({ items: folders });
+    },
+    deleteFolder(employee, params) {
+        const id = parseInt(params.id);
+        if (!id)
+            return error('Missing id');
+        lib().deleteFolder(id);
+        return success({ id });
+    },
+    // ── Serve file (không phải JSON) ────────────────────────────────
+    serveFile(req, res, uuid) {
+        const fileInfo = lib().getFilePath(uuid);
+        if (!fileInfo) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(error('File not found')));
+            return;
+        }
+        const stat = fs.statSync(fileInfo.filePath);
+        res.writeHead(200, {
+            'Content-Type': fileInfo.mimeType,
+            'Content-Length': stat.size,
+            'Content-Disposition': `inline; filename="${fileInfo.fileName}"`,
+            'Cache-Control': 'public, max-age=604800',
+            'Accept-Ranges': 'bytes',
+        });
+        fs.createReadStream(fileInfo.filePath).pipe(res);
+    },
+    serveThumb(req, res, uuid) {
+        const thumbInfo = lib().getThumbPath(uuid);
+        if (!thumbInfo) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(error('Thumb not found')));
+            return;
+        }
+        const stat = fs.statSync(thumbInfo.filePath);
+        res.writeHead(200, {
+            'Content-Type': thumbInfo.mimeType,
+            'Content-Length': stat.size,
+            'Cache-Control': 'public, max-age=604800',
+        });
+        fs.createReadStream(thumbInfo.filePath).pipe(res);
+    },
+    // ── Multipart parser ────────────────────────────────────────────
+    parseMultipart(raw, boundary) {
+        const fields = {};
+        const files = [];
+        const parts = raw.toString('binary').split(boundary);
+        for (const part of parts) {
+            if (part.includes('Content-Disposition')) {
+                const headerEnd = part.indexOf('\r\n\r\n');
+                if (headerEnd === -1)
+                    continue;
+                const headers = part.substring(0, headerEnd);
+                const bodyStart = headerEnd + 4;
+                const bodyEnd = part.lastIndexOf('\r\n--');
+                const body = part.substring(bodyStart, bodyEnd > bodyStart ? bodyEnd : part.length);
+                // Check if it's a file
+                const filenameMatch = headers.match(/filename="?([^"]*)"?/);
+                if (filenameMatch) {
+                    const fieldMatch = headers.match(/name="?([^"]*)"?/);
+                    const mimeMatch = headers.match(/Content-Type:\s*(\S+)/);
+                    // Convert back to Buffer for binary safety
+                    const buf = Buffer.from(body, 'binary');
+                    files.push({
+                        field: fieldMatch?.[1] || 'file',
+                        filename: filenameMatch[1],
+                        mimeType: mimeMatch?.[1] || 'application/octet-stream',
+                        data: buf,
+                    });
+                }
+                else {
+                    const fieldMatch = headers.match(/name="?([^"]*)"?/);
+                    if (fieldMatch) {
+                        fields[fieldMatch[1]] = body.replace(/\r?\n$/, '').replace(/^\r?\n/, '');
+                    }
+                }
+            }
+        }
+        return { fields, files };
+    },
+};
+//# sourceMappingURL=LibraryHandler.js.map

@@ -1,0 +1,290 @@
+"use strict";
+/**
+ * channelConfig.ts - Single Source of Truth cho tính năng từng kênh chat
+ * Dùng bởi UI để quyết định hiển thị/ẩn tính năng, bởi IPC facade để route API calls.
+ */
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.CHANNEL_CONFIG = void 0;
+exports.getCapability = getCapability;
+exports.channelSupports = channelSupports;
+exports.getAllChannels = getAllChannels;
+exports.getChannelLabel = getChannelLabel;
+exports.getChannelColor = getChannelColor;
+exports.normalizeChannel = normalizeChannel;
+exports.resolveAccountChannel = resolveAccountChannel;
+exports.CHANNEL_CONFIG = {
+    zalo: {
+        id: 'zalo',
+        label: 'Zalo',
+        icon: 'zalo',
+        color: '#0068FF',
+        supportsDM: true,
+        supportsGroup: true,
+        supportsText: true,
+        supportsImage: true,
+        supportsVideo: true,
+        supportsFile: true,
+        supportsAudio: true,
+        supportsGif: true,
+        supportsSticker: true,
+        supportsPoll: true,
+        supportsReminder: true,
+        supportsReply: true,
+        supportsReaction: true,
+        supportsUnsend: true,
+        supportsForward: true,
+        supportsPin: true,
+        supportsEdit: false, // Zalo không hỗ trợ edit
+        supportsBusinessCard: true,
+        supportsBankCard: true,
+        supportsTextStyle: true,
+        supportsAlias: true,
+        supportsMuteSync: true,
+        supportsPinConversation: true,
+        supportsCreateGroup: true,
+        supportsMutualGroups: true,
+        supportsBlock: true,
+        supportsReport: true,
+        supportsRemoveFriend: true,
+        supportsGroupRename: true,
+        supportsGroupEmoji: true,
+        supportsGroupNickname: true,
+        supportsGroupLink: true,
+        supportsGroupAdmin: true,
+        supportsGroupBoard: true,
+        supportsGroupLock: true,
+        supportsFriendRequest: true,
+        supportsLabel: true,
+        supportsSeenStatus: true,
+        supportsTypingIndicator: true,
+        supportsCRMSearch: true,
+        supportsCRMHistory: true,
+        supportsCRMPhoneImport: true,
+        supportsCRMGroups: true,
+        supportsScanData: false,
+        loginMethods: ['qr', 'cookie', 'auth_json'],
+        supportsChangeGroupAvatar: true,
+        supportsGroupManage: true,
+        supportsPendingApproval: true,
+        supportsLeaveGroup: true,
+        supportsGroupReload: true,
+        supportsQuickMessages: true,
+        supportsInviteToGroup: true,
+        supportsCampaigns: true,
+        quickMessageSyncMode: 'remote',
+    },
+    facebook: {
+        id: 'facebook',
+        label: 'Facebook',
+        icon: 'facebook',
+        color: '#1877F2',
+        supportsDM: true,
+        supportsGroup: true,
+        supportsText: true,
+        supportsImage: true,
+        supportsVideo: true,
+        supportsFile: true,
+        supportsAudio: true,
+        supportsGif: true,
+        supportsSticker: false,
+        supportsPoll: true,
+        supportsReminder: false,
+        supportsReply: true,
+        supportsReaction: true,
+        supportsUnsend: true,
+        supportsForward: true,
+        supportsPin: true, supportsEdit: true, // Facebook: editMessage
+        supportsBusinessCard: false,
+        supportsBankCard: false,
+        supportsTextStyle: false,
+        supportsAlias: true,
+        supportsMuteSync: false,
+        supportsPinConversation: false,
+        supportsCreateGroup: false,
+        supportsMutualGroups: false,
+        supportsBlock: true,
+        supportsReport: false,
+        supportsRemoveFriend: false,
+        supportsGroupRename: true,
+        supportsGroupEmoji: true,
+        supportsGroupNickname: true,
+        supportsGroupLink: true,
+        supportsGroupAdmin: true,
+        supportsGroupBoard: false,
+        supportsGroupLock: false,
+        supportsFriendRequest: false,
+        supportsLabel: false,
+        supportsSeenStatus: true,
+        supportsTypingIndicator: true,
+        supportsCRMSearch: false,
+        supportsCRMHistory: false,
+        supportsCRMPhoneImport: false,
+        supportsCRMGroups: false,
+        supportsScanData: true,
+        loginMethods: ['cookie', 'credentials'],
+        supportsChangeGroupAvatar: false,
+        supportsGroupManage: false,
+        supportsPendingApproval: false,
+        supportsLeaveGroup: false,
+        supportsGroupReload: false,
+        supportsQuickMessages: false,
+        supportsInviteToGroup: false,
+        supportsCampaigns: false,
+        quickMessageSyncMode: 'local',
+    },
+    telegram_bot: {
+        id: 'telegram_bot',
+        label: 'Telegram Bot',
+        icon: 'telegram',
+        color: '#0088CC',
+        supportsDM: true,
+        supportsGroup: true,
+        supportsText: true,
+        supportsImage: true,
+        supportsVideo: true,
+        supportsFile: true,
+        supportsAudio: true,
+        supportsGif: true,
+        supportsSticker: true,
+        supportsPoll: true, // Bot API: sendPoll
+        supportsReminder: false,
+        supportsReply: true,
+        supportsReaction: true, // Bot API 7.0+: setMessageReaction
+        supportsUnsend: true, // Bot API: deleteMessage
+        supportsForward: true, // Bot API: forwardMessage
+        supportsPin: true, // Bot API: pinChatMessage
+        supportsEdit: true, // Bot API: editMessageText
+        supportsBusinessCard: false,
+        supportsBankCard: false,
+        supportsTextStyle: false,
+        supportsAlias: false,
+        supportsMuteSync: false,
+        supportsPinConversation: false,
+        supportsCreateGroup: false, // Bot can't create groups
+        supportsMutualGroups: false,
+        supportsBlock: false, // Bot can't block users
+        supportsReport: false,
+        supportsRemoveFriend: false,
+        supportsGroupRename: true, // Bot API: setChatTitle
+        supportsGroupEmoji: false,
+        supportsGroupNickname: false,
+        supportsGroupLink: true, // Bot API: exportChatInviteLink
+        supportsGroupAdmin: true, // Bot API: promoteChatMember
+        supportsGroupBoard: false,
+        supportsGroupLock: false,
+        supportsFriendRequest: false,
+        supportsLabel: false,
+        supportsSeenStatus: false, // Bot can't mark as read
+        supportsTypingIndicator: false, // Bot can't send typing
+        supportsCRMSearch: false,
+        supportsCRMHistory: true,
+        supportsCRMPhoneImport: false,
+        // Chỉ hiển thị các nhóm mà Bot đã nhận được update / đã biết.
+        supportsCRMGroups: true,
+        supportsScanData: false,
+        supportsChangeGroupAvatar: true, // Bot API: setChatPhoto
+        supportsGroupManage: true, // Bot API: banChatMember, etc.
+        supportsPendingApproval: false,
+        supportsLeaveGroup: true, // Bot API: leaveChat
+        supportsGroupReload: false,
+        supportsQuickMessages: true, // Local-only feature
+        supportsInviteToGroup: true, // Bot API: invite link
+        // Chỉ chạy campaign tin nhắn đến các chat Bot đã biết.
+        supportsCampaigns: true,
+        quickMessageSyncMode: 'local',
+        loginMethods: ['credentials'], // botToken
+    },
+    telegram_user: {
+        id: 'telegram_user',
+        label: 'Telegram',
+        icon: 'telegram',
+        color: '#0088CC',
+        supportsDM: true,
+        supportsGroup: true,
+        supportsText: true,
+        supportsImage: true,
+        supportsVideo: true,
+        supportsFile: true,
+        supportsAudio: true,
+        supportsGif: true,
+        supportsSticker: true,
+        supportsPoll: false, // no MTProto poll send implementation yet
+        supportsReminder: false,
+        supportsReply: true,
+        supportsReaction: true, // MTProto: messages.SendReaction
+        supportsUnsend: true,
+        supportsForward: true,
+        supportsPin: true, // MTProto: messages.PinMessage
+        supportsEdit: true, // MTProto: messages.editMessage
+        supportsBusinessCard: false,
+        supportsBankCard: false,
+        supportsTextStyle: false,
+        supportsAlias: false,
+        supportsMuteSync: false,
+        supportsPinConversation: true,
+        supportsCreateGroup: false,
+        supportsMutualGroups: false,
+        supportsBlock: true, // MTProto: contacts.Block/Unblock
+        supportsReport: false,
+        supportsRemoveFriend: false,
+        supportsGroupRename: true,
+        supportsGroupEmoji: false,
+        supportsGroupNickname: false,
+        supportsGroupLink: true,
+        supportsGroupAdmin: true,
+        supportsGroupBoard: true, // MTProto: Telegram Topics/forum mode
+        supportsGroupLock: false,
+        supportsFriendRequest: false,
+        supportsLabel: false,
+        supportsSeenStatus: true,
+        supportsTypingIndicator: true,
+        supportsCRMSearch: false,
+        supportsCRMHistory: true,
+        supportsCRMPhoneImport: false,
+        supportsCRMGroups: true,
+        supportsScanData: false,
+        supportsChangeGroupAvatar: true,
+        supportsGroupManage: true,
+        supportsPendingApproval: false,
+        supportsLeaveGroup: true,
+        supportsGroupReload: false,
+        supportsQuickMessages: true, // Local-only feature
+        supportsInviteToGroup: true,
+        supportsCampaigns: true,
+        quickMessageSyncMode: 'local',
+        loginMethods: ['phone_otp'],
+    },
+};
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function getCapability(channel) {
+    return exports.CHANNEL_CONFIG[channel];
+}
+function channelSupports(channel, feature) {
+    return !!exports.CHANNEL_CONFIG[channel][feature];
+}
+function getAllChannels() {
+    return Object.keys(exports.CHANNEL_CONFIG);
+}
+function getChannelLabel(channel) {
+    return exports.CHANNEL_CONFIG[channel].label;
+}
+function getChannelColor(channel) {
+    return exports.CHANNEL_CONFIG[channel].color;
+}
+/**
+ * Normalize channel string — xử lý legacy data chỉ có 'zalo'/'facebook'.
+ * Dùng cho workflow, DB records, import data.
+ */
+function normalizeChannel(ch) {
+    if (ch && ch in exports.CHANNEL_CONFIG)
+        return ch;
+    return 'zalo'; // default legacy
+}
+/**
+ * Lấy channel từ account object một cách an toàn.
+ * Account cũ có thể không có field channel → default 'zalo'.
+ */
+function resolveAccountChannel(account) {
+    return normalizeChannel(account.channel);
+}
+//# sourceMappingURL=channelConfig.js.map

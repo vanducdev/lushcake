@@ -1,0 +1,8491 @@
+"use strict";
+/**
+ * TelegramUserListener.ts - MTProto listener cho Telegram cá nhân
+ *
+ * Giữ 1 kết nối MTProto sống cho mỗi tài khoản đã đăng nhập.
+ * Lắng nghe tin nhắn mới, ghi vào messages table, emit events cho UI.
+ *
+ * Pattern theo khuôn FacebookMQTTListener.ts.
+ * Sử dụng GramJS (telegram) library cho MTProto protocol.
+ */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.__test = void 0;
+exports.startListener = startListener;
+exports.refreshAccountMessages = refreshAccountMessages;
+exports.startAccountMessageRefresh = startAccountMessageRefresh;
+exports.refreshContactAvatar = refreshContactAvatar;
+exports.getBotCommands = getBotCommands;
+exports.requestWebView = requestWebView;
+exports.requestMainWebView = requestMainWebView;
+exports.prolongWebView = prolongWebView;
+exports.sendMessage = sendMessage;
+exports.editMessage = editMessage;
+exports.syncPinnedMessages = syncPinnedMessages;
+exports.ensureMessageAvailable = ensureMessageAvailable;
+exports.pinMessage = pinMessage;
+exports.deleteMessages = deleteMessages;
+exports.getMessages = getMessages;
+exports.repairMessageQuotes = repairMessageQuotes;
+exports.repairMessageMedia = repairMessageMedia;
+exports.repairEmptyMessages = repairEmptyMessages;
+exports.forwardMessages = forwardMessages;
+exports.sendFile = sendFile;
+exports.sendTyping = sendTyping;
+exports.sendCode = sendCode;
+exports.signIn = signIn;
+exports.sendReaction = sendReaction;
+exports.sendTopicFile = sendTopicFile;
+exports.signIn2FA = signIn2FA;
+exports.resetContactAvatarCache = resetContactAvatarCache;
+exports.stopListener = stopListener;
+exports.stopAllListeners = stopAllListeners;
+exports.getActiveListeners = getActiveListeners;
+exports.isConnected = isConnected;
+exports.fetchSelfAvatar = fetchSelfAvatar;
+exports.getGroupInfo = getGroupInfo;
+exports.joinGroup = joinGroup;
+exports.getGroupMembers = getGroupMembers;
+exports.hydrateMessageSenders = hydrateMessageSenders;
+exports.setDialogMute = setDialogMute;
+exports.setDialogArchived = setDialogArchived;
+exports.setDialogPin = setDialogPin;
+exports.getMessageReactions = getMessageReactions;
+exports.getUserProfile = getUserProfile;
+exports.resolveUsername = resolveUsername;
+exports.searchContacts = searchContacts;
+exports.getPeers = getPeers;
+exports.addChatUser = addChatUser;
+exports.deleteChatUser = deleteChatUser;
+exports.editChatTitle = editChatTitle;
+exports.editChatPhoto = editChatPhoto;
+exports.editChatAdmin = editChatAdmin;
+exports.leaveChat = leaveChat;
+exports.blockUser = blockUser;
+exports.unblockUser = unblockUser;
+exports.exportChatInvite = exportChatInvite;
+exports.readChatHistory = readChatHistory;
+exports.readForumTopic = readForumTopic;
+exports.getFullChat = getFullChat;
+exports.isForum = isForum;
+exports.checkForumForNewGroups = checkForumForNewGroups;
+exports.getForumTopics = getForumTopics;
+exports.getForumTopicMessages = getForumTopicMessages;
+exports.createForumTopic = createForumTopic;
+exports.editForumTopic = editForumTopic;
+exports.sendTopicMessage = sendTopicMessage;
+exports.getStickerSets = getStickerSets;
+exports.getStickerSetStickers = getStickerSetStickers;
+exports.getRecentStickers = getRecentStickers;
+exports.getGifs = getGifs;
+exports.searchGifs = searchGifs;
+exports.sendSticker = sendSticker;
+exports.sendGif = sendGif;
+exports.downloadSticker = downloadSticker;
+const telegram_1 = require("telegram");
+const sessions_1 = require("telegram/sessions");
+const events_1 = require("telegram/events");
+const Utils_1 = require("telegram/Utils");
+const path = __importStar(require("path"));
+const fs = __importStar(require("fs"));
+const Logger_1 = __importDefault(require("../../utils/Logger"));
+const DatabaseService_1 = __importDefault(require("../database/DatabaseService"));
+const EventBroadcaster_1 = __importDefault(require("../event/EventBroadcaster"));
+const FileStorageService_1 = __importDefault(require("../file/FileStorageService"));
+const avatarFetchCache_1 = require("../../utils/avatarFetchCache");
+const TelegramMessagePreview_1 = require("./TelegramMessagePreview");
+// Telegram API credentials - đăng ký tại my.telegram.org
+const telegram_config_1 = require("../../configs/telegram.config");
+const RECONNECT_DELAY_MS = 5000;
+const MAX_RECONNECT_DELAY_MS = 60000;
+const PRIMARY_RECONNECT_GRACE_MS = 70000;
+const HEALTH_CHECK_INTERVAL_MS = 45000;
+const INITIAL_DIALOG_LIMIT = 300;
+const RECENT_DIALOG_LIMIT = 200;
+// Metadata-only sweep: this is deliberately independent from history sync.
+// It establishes a trusted membership cache for every dialog on accounts with
+// thousands of channels without downloading thousands of message histories.
+const MEMBERSHIP_RECONCILE_DIALOG_LIMIT = 2500;
+const INITIAL_MESSAGES_PER_DIALOG = 100;
+const RECOVERY_MESSAGES_PER_DIALOG = 1000;
+const MAX_MANUAL_MESSAGE_DOWNLOAD = 5000;
+// Telegram message IDs are positive signed 32-bit integers. Never use a
+// timestamp-based/local temporary ID as an MTProto minId checkpoint.
+const MAX_TELEGRAM_MESSAGE_ID = 2147483647;
+/** Map accountId → ActiveListener */
+const activeListeners = new Map();
+const intentionallyDisconnectedClients = new WeakSet();
+const reconnectCatchUps = new Map();
+const manualRefreshTasks = new Map();
+const syncingAccounts = new Set();
+const recoveringUpdateAccounts = new Set();
+const membershipReconciliations = new Map();
+const membershipReconciledAccounts = new Set();
+const rawUpdateHandlers = new Map();
+/** All direct-download operations share one account queue. GramJS borrows an
+ * exported sender per DC; allowing avatar and media paths to run independently
+ * causes the "Not connected" reconnect storm seen on media-heavy forums. */
+const mediaDownloadQueues = new Map();
+const inFlightDownloadKeys = new Map();
+const mediaRepairQueues = new Map();
+const quoteRepairQueues = new Map();
+const entityHydrationQueues = new Map();
+const LOGIN_SESSION_TTL_MS = 10 * 60 * 1000;
+/** GramJS can upload only absolute paths; media DB rows may be storage-relative. */
+function resolveTelegramUploadPath(filePath) {
+    let candidate = String(filePath || '');
+    if (candidate.startsWith('local-media:///')) {
+        candidate = candidate.replace('local-media:///', '');
+    }
+    else if (candidate.startsWith('local-media://')) {
+        candidate = candidate.replace('local-media://', '');
+    }
+    return FileStorageService_1.default.resolveAbsolutePath(candidate);
+}
+// Telegram receives a lot of expected duplicate/difference events. Keep the
+// production terminal useful; detailed ingress traces are opt-in for diagnosis.
+const TELEGRAM_VERBOSE_LOGGING = process.env.TELEGRAM_VERBOSE_LOGGING === '1';
+function tgDebugLog(line) {
+    if (TELEGRAM_VERBOSE_LOGGING)
+        Logger_1.default.log(line);
+}
+/** Structured diagnostic logger for Telegram ingress pipeline.
+ *  Safe fields only — never logs session strings, access hashes, or message content. */
+function tgLog(level, accountId, source, msg, extra) {
+    const prefix = `[TG:${source}]`;
+    const fields = [`account=${accountId}`];
+    if (extra) {
+        for (const [k, v] of Object.entries(extra)) {
+            if (v !== undefined && v !== null)
+                fields.push(`${k}=${v}`);
+        }
+    }
+    const line = `${prefix} ${msg} | ${fields.join(' ')}`;
+    if (level === 'error')
+        Logger_1.default.error(line);
+    else if (level === 'warn')
+        Logger_1.default.warn(line);
+    else
+        tgDebugLog(line);
+}
+/**
+ * Always-on, privacy-safe trace for the MTProto channel/supergroup ingress
+ * path. Unlike tgLog(info), this intentionally remains visible without
+ * TELEGRAM_VERBOSE_LOGGING while we diagnose live updates that otherwise only
+ * fail on high-traffic `-100…` peers. Keep this to IDs/state only: terminal
+ * logs are routinely copied for support and must not contain message bodies,
+ * session strings, or access hashes.
+ */
+function tgChannelRealtimeTrace(stage, accountId, extra) {
+    const fields = [`account=${accountId}`];
+    for (const [key, value] of Object.entries(extra)) {
+        if (value !== undefined && value !== null && value !== '')
+            fields.push(`${key}=${value}`);
+    }
+    // Logger.log(`[TG:channel-realtime] ${stage} | ${fields.join(' ')}`);
+}
+/** Short-lived login state is separate from persistent account listeners. */
+let pendingLogin = null;
+async function clearPendingLogin() {
+    const current = pendingLogin;
+    pendingLogin = null;
+    if (current?.client) {
+        try {
+            await current.client.disconnect();
+        }
+        catch { }
+    }
+}
+function getPendingLogin() {
+    if (!pendingLogin || pendingLogin.expiresAt > Date.now())
+        return pendingLogin;
+    clearPendingLogin().catch(() => { });
+    return null;
+}
+/**
+ * GramJS uses "marked" peer IDs: user=123, basic group=-123, channel=-100123.
+ * Persisting chat.id directly loses that type marker and creates duplicate chats
+ * because dialog.id is already marked while message.getChat().id is not.
+ */
+function getCanonicalChatId(peer) {
+    try {
+        return String((0, Utils_1.getPeerId)(peer));
+    }
+    catch {
+        return String(peer?.id ?? peer ?? '');
+    }
+}
+function getForumCacheKey(accountId, chatId) {
+    return `${accountId}:${chatId}`;
+}
+function getTelegramPeerType(entity) {
+    if (entity?.className === 'Chat' || entity?.className === 'ChatForbidden')
+        return 'basic_group';
+    if (entity?.className === 'Channel' || entity?.className === 'ChannelForbidden') {
+        if (entity?.forum)
+            return 'forum';
+        return entity?.broadcast ? 'channel' : 'supergroup';
+    }
+    return 'user';
+}
+/** Persist every resolved MTProto peer independently from the conversation
+ * list. This retains access_hash for valid InputPeer construction without
+ * creating phantom contacts for group participants. */
+function cacheTelegramPeer(accountId, peerId, entity) {
+    const db = DatabaseService_1.default.getInstance();
+    if (!db || !peerId || !entity)
+        return;
+    const displayName = entity?.title || [entity?.firstName, entity?.lastName].filter(Boolean).join(' ') || entity?.username || '';
+    const peerType = getTelegramPeerType(entity);
+    db.upsertTelegramPeer(accountId, {
+        peerId,
+        peerType,
+        accessHash: entity?.accessHash != null ? String(entity.accessHash) : '',
+        username: entity?.username || '',
+        displayName,
+        phone: entity?.phone || '',
+    });
+    // A Channel carrying forum=true is authoritative and must immediately heal
+    // the denormalized contact flag used by the renderer conversation list.
+    if (peerType === 'forum')
+        db.setIsForum(accountId, peerId, true);
+}
+function getTelegramMembership(entity) {
+    if (!entity)
+        return { state: 'member', action: 'none', reason: '' };
+    if (entity.className === 'ChatForbidden' || entity.className === 'ChannelForbidden' || entity.kicked) {
+        return { state: 'forbidden', action: 'none', reason: 'Nhóm hoặc kênh này không còn khả dụng với tài khoản của bạn' };
+    }
+    if (entity.left) {
+        if (entity.joinRequest) {
+            return { state: 'request', action: 'request', reason: 'Bạn cần được quản trị viên duyệt để tham gia nhóm này' };
+        }
+        const publicUsername = entity.username || (entity.usernames || []).some((item) => item?.active && item?.username);
+        if (publicUsername || entity.hasLink) {
+            return { state: 'joinable', action: 'join', reason: 'Bạn chưa tham gia cuộc trò chuyện này' };
+        }
+        return { state: 'left', action: 'none', reason: 'Nhóm riêng tư này cần liên kết mời để tham gia lại' };
+    }
+    return { state: 'member', action: 'none', reason: '' };
+}
+function getTelegramSendCapability(entity) {
+    if (!entity)
+        return { canSend: true, reason: '' };
+    if (entity.className === 'User')
+        return { canSend: !entity.deleted, reason: entity.deleted ? 'Tài khoản Telegram không còn hoạt động' : '' };
+    const membership = getTelegramMembership(entity);
+    if (membership.state !== 'member')
+        return { canSend: false, reason: membership.reason };
+    const now = Math.floor(Date.now() / 1000);
+    const banned = entity.bannedRights;
+    const banActive = !!banned && (!Number(banned.untilDate || 0) || Number(banned.untilDate) > now);
+    if (banActive && (banned.sendMessages || banned.sendPlain || banned.viewMessages)) {
+        return { canSend: false, reason: 'Bạn không có quyền gửi tin nhắn trong cuộc trò chuyện này' };
+    }
+    if (entity.className === 'Channel' && (entity.broadcast || entity.gigagroup)) {
+        const canPost = !!entity.creator || !!entity.adminRights?.postMessages;
+        return { canSend: canPost, reason: canPost ? '' : 'Chỉ quản trị viên được đăng bài trong kênh này' };
+    }
+    if (entity.creator || entity.adminRights)
+        return { canSend: true, reason: '' };
+    const defaults = entity.defaultBannedRights;
+    if (defaults?.sendMessages || defaults?.sendPlain) {
+        return { canSend: false, reason: 'Nhóm này chỉ cho phép quản trị viên gửi tin nhắn' };
+    }
+    return { canSend: true, reason: '' };
+}
+function persistTelegramDialogState(accountId, chatId, dialog, entity, fullChat, emitRefresh = true) {
+    const db = DatabaseService_1.default.getInstance();
+    if (!db || !chatId)
+        return;
+    const existing = db.queryOne(`SELECT telegram_folder_id, is_muted, mute_until, telegram_membership_state, is_in_others FROM contacts WHERE owner_zalo_id = ? AND contact_id = ?`, [accountId, chatId]);
+    const peerType = entity ? getTelegramPeerType(entity) : (db.getTelegramPeer(accountId, chatId)?.peer_type || 'user');
+    const capability = getTelegramSendCapability(entity);
+    // Khi entity null → giữ nguyên membership state cũ thay vì reset về 'member'
+    const membership = entity
+        ? getTelegramMembership(entity)
+        : { state: (existing?.telegram_membership_state || 'member'), action: 'none', reason: '' };
+    const folderId = Number(dialog?.folderId ?? dialog?.dialog?.folderId ?? existing?.telegram_folder_id ?? 0);
+    const rawMuteUntil = dialog?.dialog?.notifySettings?.muteUntil ?? dialog?.notifySettings?.muteUntil;
+    const muteUntilSeconds = rawMuteUntil == null ? null : Number(rawMuteUntil || 0);
+    const foreverMuted = muteUntilSeconds == null
+        ? Number(existing?.is_muted || 0) === 1
+        : muteUntilSeconds >= 2147483647;
+    const muteUntilMs = muteUntilSeconds == null
+        ? Number(existing?.mute_until || 0)
+        : (foreverMuted ? 0 : muteUntilSeconds * 1000);
+    const membersCount = Number(fullChat?.participantsCount ?? entity?.participantsCount ?? 0);
+    const onlineCount = Number(fullChat?.onlineCount ?? 0);
+    const displayName = entity?.title || [entity?.firstName, entity?.lastName].filter(Boolean).join(' ') || entity?.username || chatId;
+    const contactType = peerType === 'user' ? 'user' : 'group';
+    // Saved Messages (self-chat) → auto pin local
+    const isSelfChat = peerType === 'user' && chatId === accountId;
+    // Update is_cov_bot flag — only set to 1 when confirmed bot, leave untouched otherwise
+    const isBot = entity?.className === 'User' && entity?.bot ? 1 : null;
+    // Lấy unread_count từ Telegram dialog (đồng bộ chính xác với Telegram)
+    const dialogUnreadCount = Number(dialog?.unreadCount ?? 0);
+    db.run(`INSERT INTO contacts
+       (owner_zalo_id, contact_id, display_name, avatar_url, is_friend, contact_type, unread_count, channel,
+        is_muted, mute_until, telegram_folder_id, telegram_archived, telegram_can_send,
+        telegram_send_reason, telegram_peer_type, telegram_members_count, telegram_online_count, telegram_state_updated_at,
+        telegram_membership_state, telegram_join_action, is_in_others, is_cov_bot)
+     VALUES (?, ?, ?, '', 0, ?, ?, 'telegram_user', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(owner_zalo_id, contact_id) DO UPDATE SET
+       display_name = CASE WHEN contacts.display_name = '' THEN excluded.display_name ELSE contacts.display_name END,
+       contact_type = excluded.contact_type, channel = 'telegram_user',
+       unread_count = excluded.unread_count,
+       is_muted = excluded.is_muted, mute_until = excluded.mute_until,
+       telegram_folder_id = excluded.telegram_folder_id, telegram_archived = excluded.telegram_archived,
+       telegram_can_send = excluded.telegram_can_send, telegram_send_reason = excluded.telegram_send_reason,
+       telegram_peer_type = excluded.telegram_peer_type,
+       telegram_members_count = CASE WHEN excluded.telegram_members_count > 0 THEN excluded.telegram_members_count ELSE contacts.telegram_members_count END,
+       telegram_online_count = excluded.telegram_online_count,
+       telegram_state_updated_at = excluded.telegram_state_updated_at,
+       telegram_membership_state = excluded.telegram_membership_state,
+       telegram_join_action = excluded.telegram_join_action,
+       is_in_others = excluded.is_in_others,
+       is_cov_bot = CASE WHEN excluded.is_cov_bot = 1 THEN 1 ELSE contacts.is_cov_bot END`, [accountId, chatId, displayName, contactType, dialogUnreadCount, foreverMuted ? 1 : 0, muteUntilMs,
+        folderId, folderId === 1 ? 1 : 0, capability.canSend ? 1 : 0, capability.reason,
+        peerType, membersCount, onlineCount, Date.now(), membership.state, membership.action,
+        // is_in_others: archived | chưa tham gia (joinable/request/left/forbidden)
+        (folderId === 1 || membership.state !== 'member') ? 1 : 0, isBot]);
+    // Saved Messages (self-chat) → auto pin local
+    if (isSelfChat) {
+        db.run(`INSERT OR IGNORE INTO local_pinned_conversations (owner_zalo_id, thread_id, pinned_at) VALUES (?, ?, ?)`, [accountId, chatId, Date.now()]);
+    }
+    // Emit event to trigger renderer cache refresh (othersConversations, mutedThreads)
+    if (emitRefresh) {
+        try {
+            const { EventBroadcaster } = require('../event/EventBroadcaster');
+            EventBroadcaster.emit('db:unreadChanged', {
+                zaloId: accountId,
+                source: 'telegram_dialog_state',
+            });
+        }
+        catch { }
+    }
+}
+/**
+ * Rebuild the membership cache from Telegram's dialog list without fetching
+ * any message history. Socket Channel entities can be minimal/stale, whereas
+ * a dialog entity carries the account's actual `left` state. The final pass
+ * moves old `-100…` peers not present in either main or Archived dialogs out
+ * of the normal inbox, which also repairs rows admitted by older builds.
+ */
+async function reconcileTelegramDialogMembership(accountId, client) {
+    if (membershipReconciledAccounts.has(accountId))
+        return;
+    const existingTask = membershipReconciliations.get(accountId);
+    if (existingTask)
+        return existingTask;
+    const task = (async () => {
+        const db = DatabaseService_1.default.getInstance();
+        if (!db)
+            return;
+        Logger_1.default.log(`[TelegramUserListener] Starting membership reconciliation for ${accountId}`);
+        const mainDialogs = await client.getDialogs({ limit: MEMBERSHIP_RECONCILE_DIALOG_LIMIT });
+        const archivedDialogs = await client.getDialogs({ limit: MEMBERSHIP_RECONCILE_DIALOG_LIMIT, folder: 1 });
+        // TG-03: `getDialogs` caps at MEMBERSHIP_RECONCILE_DIALOG_LIMIT per call.
+        // Absence from a truncated snapshot only means "not in this page", not
+        // "the account left the channel". Demotion requires a complete snapshot
+        // (or, later, an explicit member/left/forbidden signal).
+        const snapshotLegComplete = (list) => {
+            const total = Number(list?.total ?? list.length);
+            return list.length < MEMBERSHIP_RECONCILE_DIALOG_LIMIT && total <= list.length;
+        };
+        const snapshotComplete = snapshotLegComplete(mainDialogs) && snapshotLegComplete(archivedDialogs);
+        const seen = new Set();
+        for (const dialog of [...mainDialogs, ...archivedDialogs]) {
+            const chatId = getCanonicalChatId(dialog.id);
+            if (!chatId || !chatId.startsWith('-100') || seen.has(chatId))
+                continue;
+            seen.add(chatId);
+            if (dialog.entity)
+                cacheTelegramPeer(accountId, chatId, dialog.entity);
+            persistTelegramDialogState(accountId, chatId, dialog, dialog.entity, undefined, false);
+        }
+        if (!snapshotComplete) {
+            Logger_1.default.warn(`[TelegramUserListener] Membership snapshot truncated for ${accountId} `
+                + `(main ${mainDialogs.length}/${mainDialogs?.total ?? '?'}, `
+                + `archive ${archivedDialogs.length}/${archivedDialogs?.total ?? '?'}); `
+                + 'keeping existing member states instead of demoting from a partial view');
+            membershipReconciledAccounts.add(accountId);
+            EventBroadcaster_1.default.emit('db:unreadChanged', { zaloId: accountId, source: 'telegram_membership_reconcile' });
+            return;
+        }
+        // `getDialogs` contains every peer the account currently belongs to,
+        // including archived peers. A normal-inbox channel absent from that
+        // complete snapshot is an old/unjoined row and must not remain eligible
+        // for live ingest or occupy the All tab.
+        const memberRows = db.query(`SELECT contact_id FROM contacts
+       WHERE owner_zalo_id = ? AND channel = 'telegram_user'
+         AND contact_id LIKE '-100%' AND telegram_membership_state = 'member'`, [accountId]);
+        const staleIds = memberRows
+            .map(row => String(row.contact_id || ''))
+            .filter(chatId => !!chatId && !seen.has(chatId));
+        const now = Date.now();
+        for (let index = 0; index < staleIds.length; index += 400) {
+            const chunk = staleIds.slice(index, index + 400);
+            const placeholders = chunk.map(() => '?').join(',');
+            db.run(`UPDATE contacts
+         SET telegram_membership_state = 'left', telegram_join_action = 'none',
+             telegram_can_send = 0, telegram_send_reason = ?, is_in_others = 1,
+             telegram_state_updated_at = ?
+         WHERE owner_zalo_id = ? AND channel = 'telegram_user' AND contact_id IN (${placeholders})`, ['Bạn chưa tham gia cuộc trò chuyện này', now, accountId, ...chunk]);
+        }
+        membershipReconciledAccounts.add(accountId);
+        Logger_1.default.log(`[TelegramUserListener] Membership reconciled: ${seen.size} dialogs, ${staleIds.length} stale channels for ${accountId}`);
+        EventBroadcaster_1.default.emit('db:unreadChanged', { zaloId: accountId, source: 'telegram_membership_reconcile' });
+    })().catch((err) => {
+        Logger_1.default.warn(`[TelegramUserListener] Membership reconciliation failed for ${accountId}: ${err.message}`);
+        throw err;
+    }).finally(() => {
+        membershipReconciliations.delete(accountId);
+    });
+    membershipReconciliations.set(accountId, task);
+    return task;
+}
+function getTelegramUserStatus(user) {
+    const status = user?.status;
+    const className = String(status?.className || '');
+    const now = Math.floor(Date.now() / 1000);
+    if (className === 'UserStatusOnline' && Number(status?.expires || 0) > now) {
+        return { status: className, statusText: 'Đang online', onlineUntil: Number(status.expires) };
+    }
+    if (className === 'UserStatusOffline') {
+        return { status: className, statusText: 'Đã offline', lastSeenAt: Number(status?.wasOnline || 0) || undefined };
+    }
+    if (className === 'UserStatusRecently')
+        return { status: className, statusText: 'Hoạt động gần đây' };
+    if (className === 'UserStatusLastWeek')
+        return { status: className, statusText: 'Hoạt động trong tuần qua' };
+    if (className === 'UserStatusLastMonth')
+        return { status: className, statusText: 'Hoạt động trong tháng qua' };
+    return { status: className, statusText: '' };
+}
+function getForumTopicId(message) {
+    const replyTo = message?.replyTo;
+    if (replyTo?.replyToTopId)
+        return String(replyTo.replyToTopId);
+    // Telegram omits replyToTopId when a message replies directly to the topic
+    // root. General-topic messages do not set forumTopic and remain topic_id=NULL.
+    if (replyTo?.forumTopic && replyTo?.replyToMsgId)
+        return String(replyTo.replyToMsgId);
+    if (message?.className === 'MessageService' && message?.action?.className === 'MessageActionTopicCreate') {
+        return String(message?.id || '');
+    }
+    return undefined;
+}
+/** Telegram uses replyToMsgId both for a real reply and to attach a message
+ * to a forum topic root. When it points at the same message as topic_id it is
+ * routing metadata, not a quote preview (Telegram does not render a quote in
+ * that case). Keep topic routing in topic_id and expose only genuine replies. */
+function getTelegramReplyToMessageId(message) {
+    const replyToMessageId = message?.replyTo?.replyToMsgId != null
+        ? String(message.replyTo.replyToMsgId)
+        : '';
+    if (!replyToMessageId)
+        return undefined;
+    const topicId = getForumTopicId(message);
+    if (topicId && replyToMessageId === topicId)
+        return undefined;
+    return replyToMessageId;
+}
+function buildTelegramQuoteData(message) {
+    const attachmentValue = Array.isArray(message.attachments)
+        ? JSON.stringify(message.attachments)
+        : (message.attachments || '[]');
+    const msgType = String(message.msgType || 'text');
+    let imageLocalPath = '';
+    try {
+        const paths = typeof message.localPaths === 'string'
+            ? JSON.parse(message.localPaths || '{}')
+            : (message.localPaths || {});
+        if (msgType === 'photo' || msgType === 'image' || msgType === 'chat.photo') {
+            imageLocalPath = paths.main || paths.image || paths.thumbnail || paths.file || '';
+        }
+    }
+    catch { }
+    if (!imageLocalPath) {
+        try {
+            const attachments = typeof attachmentValue === 'string' ? JSON.parse(attachmentValue) : attachmentValue;
+            const media = (Array.isArray(attachments) ? attachments : []).find((attachment) => ['photo', 'image', 'chat.photo'].includes(String(attachment?.type || '')));
+            imageLocalPath = String(media?.localPath || '');
+        }
+        catch { }
+    }
+    return JSON.stringify({
+        msgId: message.msgId,
+        msg: message.content || '',
+        senderId: message.senderId || '',
+        fromD: message.senderName || '',
+        msgType,
+        attach: attachmentValue,
+        ...(imageLocalPath ? { imageLocalPath } : {}),
+    });
+}
+function hasUsableTelegramQuoteData(value) {
+    if (!value)
+        return false;
+    try {
+        const quote = JSON.parse(value);
+        const msgType = String(quote?.msgType || 'text');
+        // MTProto does not provide a durable CDN URL for photos. A media quote is
+        // usable only after we have a local preview; otherwise repair it instead
+        // of rendering the misleading "[Hình ảnh]" fallback.
+        if (msgType === 'photo' || msgType === 'image' || msgType === 'chat.photo') {
+            return !!quote?.imageUrl || !!quote?.imageLocalPath;
+        }
+        if (String(quote?.msg || '').trim())
+            return true;
+        if (msgType !== 'text' && msgType !== 'chat.text')
+            return true;
+        const attach = typeof quote?.attach === 'string' ? quote.attach.trim() : quote?.attach;
+        return !!quote?.imageUrl || (!!attach && attach !== '[]' && attach !== '{}');
+    }
+    catch {
+        return false;
+    }
+}
+/** Convert the aggregate MTProto reaction payload into Deplao's display model.
+ * Telegram only provides identities for a recent subset of reactors, so counts
+ * remain authoritative while the users map contains only identities Telegram
+ * actually returned (including the current account when marked as my). */
+function normalizeTelegramReactions(reactions, accountId) {
+    const normalized = { total: 0, lastReact: '', emoji: {} };
+    const getEmoji = (reaction) => {
+        if (reaction?.className === 'ReactionEmoji')
+            return String(reaction.emoticon || '');
+        if (reaction?.className === 'ReactionCustomEmoji' && reaction.documentId != null) {
+            return `tg_custom:${String(reaction.documentId)}`;
+        }
+        return '';
+    };
+    for (const result of reactions?.results || []) {
+        const emoji = getEmoji(result?.reaction);
+        const count = Math.max(0, Number(result?.count || 0));
+        if (!emoji || !count)
+            continue;
+        normalized.emoji[emoji] = { total: count, users: {} };
+        normalized.total += count;
+        normalized.lastReact = emoji;
+    }
+    for (const recent of reactions?.recentReactions || []) {
+        const emoji = getEmoji(recent?.reaction);
+        if (!emoji || !normalized.emoji[emoji])
+            continue;
+        const userId = recent?.my ? accountId : getCanonicalChatId(recent?.peerId);
+        if (!userId)
+            continue;
+        // A peer can have at most one occurrence for an emoji in this payload.
+        normalized.emoji[emoji].users[userId] = 1;
+    }
+    return normalized;
+}
+function getMessageIdFromUpdates(result) {
+    const directId = result?.id || result?.message?.id;
+    if (directId)
+        return String(directId);
+    const update = (result?.updates || []).find((item) => item?.message?.id);
+    return update?.message?.id ? String(update.message.id) : undefined;
+}
+/** MTProto basic-group methods expect the raw positive chat ID, not GramJS's marked ID. */
+function getBasicGroupId(chatId) {
+    return BigInt(String(chatId).replace(/^-100/, '').replace(/^-/, ''));
+}
+/** Telegram stickers are documents; DocumentAttributeSticker is the authoritative marker. */
+function getTelegramStickerAttachment(message) {
+    const document = message?.document;
+    const attributes = document?.attributes || [];
+    const stickerAttribute = attributes.find((attribute) => attribute?.className === 'DocumentAttributeSticker');
+    if (!stickerAttribute)
+        return null;
+    const imageSize = attributes.find((attribute) => attribute?.className === 'DocumentAttributeImageSize');
+    const mimeType = String(document?.mimeType || '');
+    const stickerFormat = mimeType.includes('tgsticker') || mimeType.includes('lottie')
+        ? 'tgs'
+        : mimeType.includes('webm')
+            ? 'webm'
+            : mimeType.includes('mp4')
+                ? 'mp4'
+                : 'webp';
+    return {
+        type: 'sticker',
+        is_sticker: true,
+        sticker_format: stickerFormat,
+        id: String(document?.id || ''),
+        dc_id: document?.dcId,
+        access_hash: String(document?.accessHash || ''),
+        emoji: stickerAttribute.alt || '',
+        width: imageSize?.w || 0,
+        height: imageSize?.h || 0,
+        mime_type: mimeType,
+    };
+}
+/** Keep Telegram-only presentation metadata inside attachments so the DB
+ * schema and external IPC surface stay stable. Broadcast posts are visually
+ * different from ordinary chat messages and may expose a discussion count. */
+function getTelegramPostAttachment(message, peerType) {
+    const isBroadcastPost = message?.post === true || peerType === 'channel';
+    if (!isBroadcastPost)
+        return null;
+    const replies = message?.replies;
+    return {
+        type: 'telegram_post',
+        is_channel_post: true,
+        post_author: String(message?.postAuthor || ''),
+        views: Math.max(0, Number(message?.views || 0)),
+        forwards: Math.max(0, Number(message?.forwards || 0)),
+        comments: Math.max(0, Number(replies?.replies || 0)),
+        recent_repliers: (replies?.recentRepliers || []).map((peer) => getCanonicalChatId(peer)).filter(Boolean),
+        discussion_channel_id: replies?.channelId != null ? String(replies.channelId) : '',
+        grouped_id: message?.groupedId != null ? String(message.groupedId) : '',
+    };
+}
+function getTelegramGroupedMediaAttachment(message) {
+    if (message?.groupedId == null)
+        return null;
+    return { type: 'telegram_grouped_media', grouped_id: String(message.groupedId) };
+}
+/** Preserve custom-emoji entity ranges. Telegram includes a Unicode fallback
+ * in message.message; the renderer uses these ranges without applying Zalo's
+ * text-code conversion to that fallback. */
+function getTelegramCustomEmojiAttachments(message) {
+    return (message?.entities || [])
+        .filter((entity) => entity?.className === 'MessageEntityCustomEmoji')
+        .map((entity) => ({
+        type: 'custom_emoji',
+        document_id: String(entity.documentId || ''),
+        offset: Math.max(0, Number(entity.offset || 0)),
+        length: Math.max(0, Number(entity.length || 0)),
+    }))
+        .filter((entity) => entity.document_id && entity.length > 0);
+}
+/** Read the last server-issued Telegram message ID for a dialog. Some legacy
+ * optimistic rows used Date.now() as msg_id; they remain valid local rows but
+ * are not legal MTProto message IDs and must be excluded from history cursors. */
+function getTelegramHistoryCheckpoint(db, accountId, chatId) {
+    const recovery = db.queryOne(`SELECT history_start_msg_id FROM telegram_channel_recovery_queue
+     WHERE owner_zalo_id = ? AND channel_id = ? AND status IN ('pending', 'draining')`, [accountId, chatId]);
+    if (recovery?.history_start_msg_id != null)
+        return Number(recovery.history_start_msg_id);
+    const checkpoint = db.queryOne(`SELECT MAX(CASE
+       WHEN CAST(msg_id AS INTEGER) BETWEEN 1 AND ${MAX_TELEGRAM_MESSAGE_ID}
+       THEN CAST(msg_id AS INTEGER)
+     END) AS lastMessageId
+     FROM messages
+     WHERE owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [accountId, chatId]);
+    const messageId = Number(checkpoint?.lastMessageId || 0);
+    return Number.isSafeInteger(messageId) && messageId > 0 && messageId <= MAX_TELEGRAM_MESSAGE_ID
+        ? messageId
+        : 0;
+}
+/** Keep native mention ranges so the renderer never has to guess from a raw @. */
+function getTelegramMentionAttachments(message) {
+    const text = String(message?.message || message?.text || '');
+    return (message?.entities || [])
+        .filter((entity) => entity?.className === 'MessageEntityMentionName'
+        || entity?.className === 'MessageEntityMention')
+        .map((entity) => {
+        let rawUserId = entity?.userId?.userId ?? entity?.userId ?? '';
+        if (rawUserId && typeof rawUserId === 'object' && typeof rawUserId.valueOf === 'function') {
+            rawUserId = rawUserId.valueOf();
+        }
+        const userId = ['string', 'number', 'bigint'].includes(typeof rawUserId)
+            ? String(rawUserId)
+            : '';
+        const offset = Math.max(0, Number(entity?.offset || 0));
+        const length = Math.max(0, Number(entity?.length || 0));
+        // A MessageEntityMention is an @username token and deliberately has no
+        // userId. Preserve that token so the renderer can resolve it on click.
+        const username = entity?.className === 'MessageEntityMention'
+            ? text.slice(offset, offset + length).replace(/^@/, '')
+            : '';
+        return {
+            type: 'telegram_mention',
+            offset,
+            length,
+            user_id: userId,
+            username,
+        };
+    })
+        .filter((entity) => entity.length > 0);
+}
+/** Normalize Telegram media once for socket, difference and API-history paths.
+ * GramJS exposes stickers/voice/GIF/video-note as documents too, so the
+ * specialized getters must be checked before the generic document branch. */
+function normalizeTelegramMessageMedia(message, peerType) {
+    const attachments = [];
+    const postAttachment = getTelegramPostAttachment(message, peerType);
+    if (postAttachment)
+        attachments.push(postAttachment);
+    const groupedMediaAttachment = getTelegramGroupedMediaAttachment(message);
+    if (groupedMediaAttachment)
+        attachments.push(groupedMediaAttachment);
+    attachments.push(...getTelegramCustomEmojiAttachments(message));
+    attachments.push(...getTelegramMentionAttachments(message));
+    let content = String(message?.message || message?.text || '');
+    const sticker = getTelegramStickerAttachment(message);
+    let msgType = 'text';
+    const media = message?.media;
+    const mediaClass = String(media?.className || '');
+    if (message?.photo) {
+        msgType = 'photo';
+        const photo = message.photo;
+        const sizes = Array.isArray(photo?.sizes) ? photo.sizes : [];
+        const largest = sizes[sizes.length - 1];
+        attachments.push({
+            type: 'photo', id: String(photo?.id || ''), dc_id: photo?.dcId,
+            access_hash: String(photo?.accessHash || ''), width: largest?.w || 0,
+            height: largest?.h || 0, file_size: largest?.size || 0,
+        });
+    }
+    else if (sticker) {
+        msgType = 'sticker';
+        attachments.push(sticker);
+    }
+    else if (message?.videoNote) {
+        msgType = 'video_note';
+        const videoNote = message.videoNote;
+        attachments.push({
+            type: 'video_note', id: String(videoNote?.id || ''), dc_id: videoNote?.dcId,
+            access_hash: String(videoNote?.accessHash || ''), duration: videoNote?.duration || 0,
+            width: videoNote?.w || 0, height: videoNote?.h || 0, file_size: videoNote?.size || 0,
+        });
+    }
+    else if (message?.voice) {
+        msgType = 'audio';
+        const voice = message.voice;
+        attachments.push({
+            type: 'voice', id: String(voice?.id || ''), dc_id: voice?.dcId,
+            access_hash: String(voice?.accessHash || ''), duration: voice?.duration || 0,
+            file_size: voice?.size || 0, mime_type: voice?.mimeType || '',
+        });
+    }
+    else if (message?.audio) {
+        msgType = 'audio';
+        const audio = message.audio;
+        attachments.push({
+            type: 'audio', id: String(audio?.id || ''), dc_id: audio?.dcId,
+            access_hash: String(audio?.accessHash || ''), duration: audio?.duration || 0,
+            file_size: audio?.size || 0, mime_type: audio?.mimeType || '',
+        });
+    }
+    else if (message?.gif) {
+        msgType = 'video';
+        const gif = message.gif;
+        attachments.push({
+            type: 'gif', id: String(gif?.id || ''), dc_id: gif?.dcId,
+            access_hash: String(gif?.accessHash || ''), duration: gif?.duration || 0,
+            width: gif?.w || 0, height: gif?.h || 0, file_size: gif?.size || 0,
+            mime_type: gif?.mimeType || '',
+        });
+    }
+    else if (message?.video) {
+        msgType = 'video';
+        const video = message.video;
+        attachments.push({
+            type: 'video', id: String(video?.id || ''), dc_id: video?.dcId,
+            access_hash: String(video?.accessHash || ''), duration: video?.duration || 0,
+            width: video?.w || 0, height: video?.h || 0, file_size: video?.size || 0,
+            mime_type: video?.mimeType || '',
+        });
+    }
+    else if (message?.document) {
+        msgType = 'file';
+        const document = message.document;
+        const attributes = document?.attributes || [];
+        const filename = attributes.find((attribute) => attribute?.className === 'DocumentAttributeFilename')?.fileName || document?.name || '';
+        attachments.push({
+            type: 'file', id: String(document?.id || ''), dc_id: document?.dcId,
+            access_hash: String(document?.accessHash || ''), file_name: filename,
+            name: filename, mime_type: document?.mimeType || '', file_size: document?.size || 0,
+            fileSize: document?.size || 0,
+        });
+    }
+    else if (mediaClass === 'MessageMediaWebPage') {
+        const webpage = media?.webpage || {};
+        msgType = 'telegram.webpage';
+        content || (content = String(webpage?.title || webpage?.description || webpage?.url || 'Liên kết'));
+        attachments.push({
+            type: 'webpage', url: webpage?.url || '', display_url: webpage?.displayUrl || '',
+            site_name: webpage?.siteName || '', title: webpage?.title || '',
+            description: webpage?.description || '', author: webpage?.author || '',
+        });
+    }
+    else if (mediaClass === 'MessageMediaContact') {
+        msgType = 'telegram.contact';
+        const displayName = [media?.firstName, media?.lastName].filter(Boolean).join(' ').trim();
+        content || (content = displayName || media?.phoneNumber || 'Liên hệ');
+        attachments.push({
+            type: 'contact', user_id: String(media?.userId || ''), name: displayName,
+            phone: media?.phoneNumber || '', vcard: media?.vcard || '',
+        });
+    }
+    else if (mediaClass === 'MessageMediaGeo' || mediaClass === 'MessageMediaGeoLive' || mediaClass === 'MessageMediaVenue') {
+        const geo = media?.geo || {};
+        msgType = mediaClass === 'MessageMediaVenue' ? 'telegram.venue' : 'telegram.location';
+        content || (content = mediaClass === 'MessageMediaVenue'
+            ? [media?.title, media?.address].filter(Boolean).join(' — ') || 'Địa điểm'
+            : mediaClass === 'MessageMediaGeoLive' ? 'Vị trí trực tiếp' : 'Vị trí');
+        attachments.push({
+            type: mediaClass === 'MessageMediaVenue' ? 'venue' : 'location',
+            latitude: Number(geo?.lat || 0), longitude: Number(geo?.long || 0),
+            title: media?.title || '', address: media?.address || '',
+            live: mediaClass === 'MessageMediaGeoLive', period: Number(media?.period || 0),
+        });
+    }
+    else if (mediaClass === 'MessageMediaPoll') {
+        const poll = media?.poll || {};
+        const question = String(poll?.question?.text || poll?.question || 'Bình chọn');
+        msgType = 'telegram.poll';
+        content || (content = question);
+        const resultByOption = new Map();
+        for (const result of media?.results?.results || []) {
+            const key = Buffer.from(result?.option || []).toString('base64');
+            resultByOption.set(key, result);
+        }
+        attachments.push({
+            type: 'poll', id: String(poll?.id || ''), question,
+            closed: !!poll?.closed, multiple_choice: !!poll?.multipleChoice, quiz: !!poll?.quiz,
+            open_answers: !!poll?.openAnswers,
+            total_voters: Number(media?.results?.totalVoters || 0),
+            answers: (poll?.answers || []).map((answer) => {
+                const option = Buffer.from(answer?.option || []).toString('base64');
+                const result = resultByOption.get(option);
+                return {
+                    text: String(answer?.text?.text || answer?.text || ''), option,
+                    voters: Number(result?.voters || 0), chosen: !!result?.chosen, correct: !!result?.correct,
+                };
+            }),
+        });
+    }
+    else if (mediaClass === 'MessageMediaDice') {
+        msgType = 'telegram.dice';
+        content || (content = `${media?.emoticon || '🎲'} ${Number(media?.value || 0)}`);
+        attachments.push({ type: 'dice', emoticon: media?.emoticon || '🎲', value: Number(media?.value || 0) });
+    }
+    else if (mediaClass === 'MessageMediaGame') {
+        const game = media?.game || {};
+        msgType = 'telegram.game';
+        content || (content = String(game?.title || game?.description || 'Trò chơi'));
+        attachments.push({ type: 'game', id: String(game?.id || ''), title: game?.title || '', description: game?.description || '' });
+    }
+    else if (mediaClass === 'MessageMediaInvoice') {
+        msgType = 'telegram.invoice';
+        content || (content = String(media?.title || media?.description || 'Hóa đơn'));
+        attachments.push({
+            type: 'invoice', title: media?.title || '', description: media?.description || '',
+            currency: media?.currency || '', total_amount: String(media?.totalAmount || ''), test: !!media?.test,
+        });
+    }
+    else if (mediaClass === 'MessageMediaStory') {
+        msgType = 'telegram.story';
+        content || (content = 'Tin (Story)');
+        attachments.push({ type: 'story', id: String(media?.id || ''), peer_id: String(media?.peer?.userId || media?.peer?.channelId || '') });
+    }
+    else if (mediaClass === 'MessageMediaGiveaway' || mediaClass === 'MessageMediaGiveawayResults') {
+        msgType = 'telegram.giveaway';
+        content || (content = mediaClass === 'MessageMediaGiveawayResults' ? 'Kết quả giveaway' : 'Giveaway');
+        attachments.push({
+            type: 'giveaway', result: mediaClass === 'MessageMediaGiveawayResults',
+            quantity: Number(media?.quantity || media?.winnersCount || 0),
+            prize_description: media?.prizeDescription || '', until_date: Number(media?.untilDate || 0),
+            stars: String(media?.stars || ''), months: Number(media?.months || 0),
+        });
+    }
+    else if (mediaClass === 'MessageMediaPaidMedia') {
+        msgType = 'telegram.paid_media';
+        content || (content = `Nội dung trả phí (${String(media?.starsAmount || 0)} Stars)`);
+        attachments.push({ type: 'paid_media', stars_amount: String(media?.starsAmount || 0), items: Number(media?.extendedMedia?.length || 0) });
+    }
+    else if (mediaClass === 'MessageMediaUnsupported') {
+        msgType = 'telegram.unsupported';
+        content || (content = 'Loại tin nhắn Telegram chưa được hỗ trợ');
+        attachments.push({ type: 'unsupported', media_class: mediaClass });
+    }
+    else if (mediaClass && mediaClass !== 'MessageMediaEmpty') {
+        msgType = 'telegram.unknown';
+        content || (content = `Tin nhắn Telegram (${mediaClass})`);
+        attachments.push({ type: 'unknown', media_class: mediaClass });
+        Logger_1.default.warn(`[TG:media] UNHANDLED account=${String(message?._clientAccountId || '') || 'unknown'} ` +
+            `chatId=${deriveMessageIdentity(message).chatId || 'unknown'} msg=${String(message?.id || '') || 'unknown'} class=${mediaClass}`);
+    }
+    return { content, msgType, attachments };
+}
+/** Parse ReplyInlineMarkup from message into structured button rows */
+function parseInlineButtons(message) {
+    const replyMarkup = message?.replyMarkup;
+    if (!replyMarkup || replyMarkup.className !== 'ReplyInlineMarkup')
+        return null;
+    const rows = replyMarkup.rows || [];
+    return rows.map((row) => {
+        const buttons = row.buttons || [];
+        return buttons.map((btn) => {
+            if (btn.className === 'KeyboardButtonUrl') {
+                return { text: btn.text || '', type: 'url', url: btn.url || '' };
+            }
+            if (btn.className === 'KeyboardButtonWebView') {
+                return { text: btn.text || '', type: 'webview', url: btn.url || '' };
+            }
+            if (btn.className === 'KeyboardButtonCallback') {
+                return { text: btn.text || '', type: 'callback' };
+            }
+            // Other button types — render as text-only
+            return { text: btn.text || btn.className || '', type: 'callback' };
+        });
+    });
+}
+// ─── Phase B: Identity derivation (peerId-first, no getChat dependency) ──────
+/** Derive canonical chatId, threadType, and topicId from a message without
+ *  requiring getChat() to succeed. peerId is authoritative for identity. */
+function deriveMessageIdentity(message, resolvedEntity) {
+    const peerId = message?.peerId;
+    let chatId = '';
+    let peerKind = 'user';
+    if (peerId) {
+        try {
+            chatId = String((0, Utils_1.getPeerId)(peerId));
+        }
+        catch {
+            chatId = String(peerId?.userId ?? peerId?.chatId ?? peerId?.channelId ?? '');
+        }
+        if (peerId.className === 'PeerChannel' || String(chatId).startsWith('-100')) {
+            peerKind = 'channel';
+        }
+        else if (peerId.className === 'PeerChat' || String(chatId).startsWith('-')) {
+            peerKind = 'chat';
+        }
+    }
+    // Fallback to resolved entity if peerId derivation failed
+    if (!chatId && resolvedEntity) {
+        chatId = getCanonicalChatId(resolvedEntity);
+        if (resolvedEntity.className === 'Channel')
+            peerKind = 'channel';
+        else if (resolvedEntity.className === 'Chat')
+            peerKind = 'chat';
+    }
+    // Last resort: message.id based fallback (should not happen for valid messages)
+    if (!chatId) {
+        chatId = String(message?.chatId ?? message?.peerId?.userId ?? '');
+    }
+    const threadType = peerKind === 'user' ? 0 : 1;
+    const topicId = getForumTopicId(message);
+    return { chatId, threadType, topicId, peerKind };
+}
+/** Persist a normalized message to DB idempotently.
+ *  Returns { inserted: true } only when a NEW row was created.
+ *  Callers must use this flag to gate unread increments, contact updates, and UI events. */
+function persistTelegramMessage(db, msg) {
+    if (!msg.msgId || !msg.chatId)
+        return { status: 'ignored' };
+    tgDebugLog(`[TG:persist] msgId=${msg.msgId} msgType=${msg.msgType} isSelf=${msg.isSelf} attachments=${(msg.attachments || []).length}`);
+    // Check if already exists
+    const existing = db.queryOne(`SELECT msg_id, attachments, content, msg_type, quote_data FROM messages WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [msg.msgId, msg.accountId, msg.chatId]);
+    if (existing) {
+        tgDebugLog(`[TG:persist] DUPLICATE msgId=${msg.msgId} existing_attachments=${existing.attachments?.length || 0} new_attachments=${msg.attachments?.length || 0}`);
+        // A replay may carry richer post/sticker/custom-emoji metadata than an
+        // earlier history row. Merge it without repeating unread/UI side effects.
+        let currentAttachments = [];
+        try {
+            currentAttachments = JSON.parse(existing.attachments || '[]');
+        }
+        catch { }
+        const merged = [...currentAttachments];
+        for (const attachment of msg.attachments || []) {
+            const identity = `${attachment?.type || ''}:${attachment?.id || attachment?.document_id || ''}:${attachment?.offset ?? ''}`;
+            const index = merged.findIndex((item) => `${item?.type || ''}:${item?.id || item?.document_id || ''}:${item?.offset ?? ''}` === identity);
+            if (index >= 0)
+                merged[index] = { ...merged[index], ...attachment };
+            else
+                merged.push(attachment);
+        }
+        db.run(`UPDATE messages SET attachments = ?, content = ?, msg_type = ?, reactions = CASE WHEN ? IS NOT NULL THEN ? ELSE reactions END,
+                           reply_to_id = ?, quote_data = COALESCE(quote_data, ?),
+                           topic_id = COALESCE(topic_id, ?)
+       WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [
+            JSON.stringify(merged),
+            existing.content || msg.content,
+            // Always update msg_type from socket echo (more accurate than sendFile's extension-based detection)
+            msg.msgType || existing.msg_type,
+            msg.reactions == null ? null : JSON.stringify(msg.reactions),
+            msg.reactions == null ? null : JSON.stringify(msg.reactions),
+            msg.replyToId || null,
+            msg.quoteData || null,
+            msg.topicId || null,
+            msg.msgId, msg.accountId, msg.chatId,
+        ]);
+        // Return 'updated' if attachments were actually merged (so caller can emit event for UI)
+        const hadAttachments = currentAttachments.length > 0;
+        const newAttachments = (msg.attachments || []).length > 0;
+        const mergeStatus = hadAttachments && newAttachments ? 'updated' : 'duplicate';
+        tgDebugLog(`[TG:persist] MERGE_RESULT msgId=${msg.msgId} status=${mergeStatus} merged_count=${merged.length}`);
+        return { status: mergeStatus, chatId: msg.chatId, messageId: msg.msgId };
+    }
+    try {
+        db.run(`
+      INSERT INTO messages
+        (msg_id, owner_zalo_id, thread_id, thread_type, sender_id, content, msg_type, timestamp, is_sent, attachments, reactions, status, channel, reply_to_id, quote_data, topic_id, inline_buttons)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'telegram_user', ?, ?, ?, ?)
+    `, [
+            msg.msgId, msg.accountId, msg.chatId, msg.threadType,
+            msg.senderId, msg.content, msg.msgType, msg.timestamp,
+            msg.isSelf ? 1 : 0, JSON.stringify(msg.attachments), JSON.stringify(msg.reactions || { total: 0, lastReact: '', emoji: {} }),
+            msg.isSelf ? 'sent' : 'received',
+            msg.replyToId || null, msg.quoteData || null, msg.topicId || null,
+            msg.inlineButtons ? JSON.stringify(msg.inlineButtons) : null,
+        ]);
+        return { status: 'inserted', chatId: msg.chatId, messageId: msg.msgId };
+    }
+    catch (err) {
+        // UNIQUE constraint = duplicate (race condition between socket + difference)
+        if (err.message?.includes('UNIQUE')) {
+            return { status: 'duplicate', chatId: msg.chatId, messageId: msg.msgId };
+        }
+        tgLog('error', msg.accountId, 'socket', `persist failed: ${err.message}`, { msgId: msg.msgId });
+        return { status: 'failed', chatId: msg.chatId, messageId: msg.msgId };
+    }
+}
+/** Initialize a raw Api.Message from channel-difference results so it can go
+ *  through the standard handleNewMessage pipeline. Without this, getChat() and
+ *  getSender() return undefined and the message is silently dropped (P0.1). */
+function initializeRecoveredMessage(message, client, entities, resolvedChat) {
+    const event = new events_1.NewMessageEvent(message, { _entities: entities });
+    event._setClient(client);
+    // `message.chat` is commonly unset on raw socket updates even when the
+    // update carries the authoritative Channel entity in `_entities`.  Preserve
+    // it on our wrapper instead of forcing GramJS getChat(), which can make an
+    // unnecessary RPC in the realtime hot path.
+    if (resolvedChat)
+        event.__deplaoResolvedChat = resolvedChat;
+    return event;
+}
+/** Derive chatId from a raw message's peerId without any entity resolution.
+ *  This is the fallback when even initialized messages can't resolve getChat(). */
+function deriveChatIdFromRawMessage(message) {
+    const peerId = message?.peerId;
+    if (!peerId)
+        return undefined;
+    try {
+        return String((0, Utils_1.getPeerId)(peerId));
+    }
+    catch {
+        // Manual derivation for PeerUser/PeerChat/PeerChannel
+        if (peerId.userId)
+            return String(peerId.userId);
+        if (peerId.chatId)
+            return `-${peerId.chatId}`;
+        if (peerId.channelId)
+            return `-100${peerId.channelId}`;
+        return undefined;
+    }
+}
+// ─── Connection Management ───────────────────────────────────────────────────
+/**
+ * Start MTProto listener cho 1 tài khoản
+ */
+async function startListener(account) {
+    const existing = activeListeners.get(account.accountId);
+    if (existing) {
+        existing.account = account;
+        existing.stopped = false;
+        if (existing.connected && existing.client?.connected) {
+            return { success: true };
+        }
+        if (existing.reconnectTimer) {
+            clearTimeout(existing.reconnectTimer);
+            existing.reconnectTimer = null;
+        }
+        try {
+            await connectListener(existing);
+            return { success: true };
+        }
+        catch (err) {
+            return { success: false, error: err.message };
+        }
+    }
+    if (!telegram_config_1.API_ID || !telegram_config_1.API_HASH) {
+        return { success: false, error: 'Telegram API credentials chưa được cấu hình. Liên hệ admin.' };
+    }
+    const listener = {
+        account,
+        client: null,
+        connected: false,
+        reconnectTimer: null,
+        healthTimer: null,
+        channelPollTimer: null,
+        connecting: null,
+        healthCheckClient: null,
+        transportDownSince: null,
+        retryCount: 0,
+        lastTransportErrorAt: 0,
+        stopped: false,
+    };
+    activeListeners.set(account.accountId, listener);
+    try {
+        await connectListener(listener);
+        return { success: true };
+    }
+    catch (err) {
+        Logger_1.default.error(`[TelegramUserListener] Failed to start for ${account.accountId}: ${err.message}`);
+        // Keep the listener registered: connectListener has scheduled recovery and
+        // removing it here previously made a failed first connection permanent.
+        return { success: false, error: err.message };
+    }
+}
+function clearHealthCheck(listener) {
+    if (listener.healthTimer) {
+        clearInterval(listener.healthTimer);
+        listener.healthTimer = null;
+    }
+    listener.healthCheckClient = null;
+}
+function isFatalTelegramSessionError(err) {
+    const value = err;
+    const message = String(value?.errorMessage || value?.message || value || '').toUpperCase();
+    return [
+        'AUTH_KEY_UNREGISTERED',
+        'AUTH_KEY_DUPLICATED',
+        'SESSION_REVOKED',
+        'SESSION_EXPIRED',
+        'USER_DEACTIVATED',
+        'USER_DEACTIVATED_BAN',
+    ].some(code => message.includes(code));
+}
+/**
+ * A raw UpdateNewChannelMessage can arrive before the high-level event has
+ * resolved its chat.  Persist the embedded Channel entity first when GramJS
+ * provides it, so a PTS-gap recovery has the access_hash it needs instead of
+ * turning the channel into a terminal `missing_access_hash` failure.
+ */
+function cacheRawChannelEntity(accountId, update, chatId) {
+    const entities = update?._entities;
+    if (!(entities instanceof Map))
+        return null;
+    for (const entity of entities.values()) {
+        try {
+            if (getCanonicalChatId(entity) === chatId) {
+                cacheTelegramPeer(accountId, chatId, entity);
+                return entity;
+            }
+        }
+        catch {
+            // A malformed unrelated entity must never reject the incoming update.
+        }
+    }
+    return null;
+}
+/**
+ * GramJS can report a broken primary update loop through `onError` before (or
+ * without) delivering UpdateConnectionState.disconnected.  Treat only socket
+ * and network failures as an outage here; RPC errors such as FLOOD_WAIT must
+ * not tear down a healthy listener.
+ */
+function isTelegramTransportError(err) {
+    const value = err;
+    const message = String(value?.errorMessage || value?.message || value || '').toUpperCase();
+    return [
+        'TIMEOUT',
+        'CONNECTION',
+        'SOCKET',
+        'DISCONNECTED',
+        'ECONNRESET',
+        'ECONNREFUSED',
+        'ETIMEDOUT',
+        'EHOSTUNREACH',
+        'ENETUNREACH',
+        'NETWORK',
+    ].some(code => message.includes(code));
+}
+function markPrimaryConnectionRestored(listener, client, source) {
+    if (listener.stopped || listener.client !== client || !client.connected)
+        return;
+    if (listener.reconnectTimer) {
+        clearTimeout(listener.reconnectTimer);
+        listener.reconnectTimer = null;
+    }
+    const wasConnected = listener.connected;
+    // GramJS can emit UpdateConnectionState.connected for the initial socket
+    // handshake (and occasionally duplicate it while the socket is already
+    // healthy). A history/channel catch-up is only warranted after this
+    // listener observed a transport outage; otherwise every startup would
+    // re-enqueue all previously completed channel recoveries.
+    const hadTransportOutage = listener.transportDownSince !== null;
+    listener.connected = true;
+    listener.transportDownSince = null;
+    listener.retryCount = 0;
+    startHealthCheck(listener);
+    startChannelPoller(listener);
+    if (!wasConnected) {
+        EventBroadcaster_1.default.emit('event:connected', {
+            zaloId: listener.account.accountId,
+            accountInfo: { channel: 'telegram_user' },
+        });
+    }
+    tgLog('info', listener.account.accountId, 'socket', 'PRIMARY_CONNECTION_RESTORED', { result: source });
+    if (hadTransportOutage) {
+        Logger_1.default.log(`[TelegramUserListener] Starting reconnect catch-up for ${listener.account.accountId} (${source})`);
+        scheduleReconnectCatchUp(listener, client);
+    }
+}
+function scheduleReconnect(listener, reason, err) {
+    const wasConnected = listener.connected;
+    listener.connected = false;
+    listener.transportDownSince ?? (listener.transportDownSince = Date.now());
+    clearHealthCheck(listener);
+    stopChannelPoller(listener);
+    if (listener.stopped)
+        return;
+    if (isFatalTelegramSessionError(err)) {
+        if (listener.reconnectTimer) {
+            clearTimeout(listener.reconnectTimer);
+            listener.reconnectTimer = null;
+        }
+        if (listener.client) {
+            intentionallyDisconnectedClients.add(listener.client);
+            listener.client.disconnect().catch(() => { });
+        }
+        Logger_1.default.error(`[TelegramUserListener] Session cannot reconnect for ${listener.account.accountId} (${reason})`);
+        EventBroadcaster_1.default.emit('event:disconnected', {
+            zaloId: listener.account.accountId,
+            reason: 'session_invalid',
+        });
+        return;
+    }
+    if (listener.reconnectTimer)
+        return;
+    if (wasConnected) {
+        EventBroadcaster_1.default.emit('event:disconnected', {
+            zaloId: listener.account.accountId,
+            reason,
+        });
+    }
+    listener.retryCount++;
+    const delay = Math.min(RECONNECT_DELAY_MS * Math.pow(2, Math.min(listener.retryCount - 1, 10)), MAX_RECONNECT_DELAY_MS);
+    Logger_1.default.log(`[TelegramUserListener] Reconnecting in ${delay}ms (attempt ${listener.retryCount}, ${reason})`);
+    const reconnect = () => {
+        listener.reconnectTimer = null;
+        if (listener.stopped)
+            return;
+        const currentClient = listener.client;
+        if (currentClient?.connected) {
+            markPrimaryConnectionRestored(listener, currentClient, 'timer_transport_alive');
+            return;
+        }
+        // GramJS first tries to reconnect its main sender in place. Do not destroy
+        // that client mid-handshake; five connection attempts can legitimately take
+        // close to a minute. If it remains stuck beyond the grace window, rebuild it.
+        const senderReconnecting = !!currentClient?._sender?.isReconnecting;
+        const downFor = Date.now() - (listener.transportDownSince || Date.now());
+        if (senderReconnecting && downFor < PRIMARY_RECONNECT_GRACE_MS) {
+            listener.reconnectTimer = setTimeout(reconnect, RECONNECT_DELAY_MS);
+            return;
+        }
+        connectListener(listener).catch((err) => {
+            Logger_1.default.warn(`[TelegramUserListener] Reconnect failed: ${err.message}`);
+        });
+    };
+    listener.reconnectTimer = setTimeout(reconnect, delay);
+}
+function startHealthCheck(listener) {
+    clearHealthCheck(listener);
+    listener.healthTimer = setInterval(async () => {
+        if (listener.stopped || !listener.client)
+            return;
+        const client = listener.client;
+        if (listener.healthCheckClient)
+            return;
+        listener.healthCheckClient = client;
+        try {
+            if (!client.connected)
+                throw new Error('MTProto transport disconnected');
+            // TG-04: getMe() has no transport-level deadline. A hung RPC previously
+            // kept healthCheckClient latched forever, which made every later tick
+            // return early — the account looked healthy while nothing was probing it.
+            const PROBE_TIMEOUT_MS = 15000;
+            let probeTimeout;
+            await Promise.race([
+                client.getMe(),
+                new Promise((_, reject) => {
+                    probeTimeout = setTimeout(() => reject(new Error('health_probe_timeout')), PROBE_TIMEOUT_MS);
+                }),
+            ]).finally(() => {
+                if (probeTimeout)
+                    clearTimeout(probeTimeout);
+            });
+            if (listener.client !== client || listener.stopped)
+                return;
+            listener.connected = true;
+            listener.retryCount = 0;
+        }
+        catch (err) {
+            if (listener.client !== client || listener.stopped)
+                return;
+            Logger_1.default.warn(`[TelegramUserListener] Health check failed for ${listener.account.accountId}: ${err.message}`);
+            scheduleReconnect(listener, 'health_check', err);
+        }
+        finally {
+            if (listener.healthCheckClient === client)
+                listener.healthCheckClient = null;
+        }
+    }, HEALTH_CHECK_INTERVAL_MS);
+}
+function scheduleReconnectCatchUp(listener, client) {
+    const accountId = listener.account.accountId;
+    if (reconnectCatchUps.has(accountId))
+        return;
+    let retryNeeded = false;
+    const task = (async () => {
+        const idle = await waitForTelegramAccountSync(accountId, 30000);
+        if (!idle) {
+            retryNeeded = true;
+            return;
+        }
+        if (listener.client !== client || listener.stopped || !client.connected)
+            return;
+        const result = await synchronizeTelegramAccount(accountId, client, {
+            includeHistory: true,
+            recoverRecentChannels: true,
+        });
+        EventBroadcaster_1.default.emit('event:telegramSync', result.success
+            ? { zaloId: accountId, status: 'completed', inserted: result.inserted, pending: !result.historyComplete }
+            : { zaloId: accountId, status: 'failed', error: 'Không thể hoàn tất đồng bộ tin nhắn Telegram' });
+        if (!result.success) {
+            retryNeeded = true;
+            Logger_1.default.warn(`[TelegramUserListener] Reconnect catch-up was deferred for ${accountId}`);
+        }
+    })().catch((err) => {
+        Logger_1.default.warn(`[TelegramUserListener] Reconnect catch-up failed for ${accountId}: ${err.message}`);
+    }).finally(() => {
+        if (reconnectCatchUps.get(accountId) === task)
+            reconnectCatchUps.delete(accountId);
+        const current = activeListeners.get(accountId);
+        if (current?.client &&
+            (current.client !== client || retryNeeded) &&
+            current.connected &&
+            current.client.connected &&
+            !current.stopped) {
+            setTimeout(() => scheduleReconnectCatchUp(current, current.client), 1000);
+        }
+    });
+    reconnectCatchUps.set(accountId, task);
+}
+// ─── Channel Poller (Phase D/E rewrite) ─────────────────────────────────────
+// Channels/supergroups have independent PTS from the global message box.
+// Socket updates are the primary realtime source; difference is for gap recovery.
+// Short-poll is reserved for actively-viewed peers only (max 10/account).
+//
+// Phase D: Proper PTS state machine with commit-after-success.
+// Phase E: Per-account+channel serialization, no global lock.
+const CHANNEL_POLL_INTERVAL_MS = 15000;
+const ACTIVE_CHANNEL_LEASE_MS = 10 * 60000;
+const MAX_ACTIVE_CHANNELS_PER_ACCOUNT = 10;
+const URGENT_CHANNEL_RECOVERY_PRIORITY = 1000;
+// The MTProto socket remains the primary realtime transport.  This dialog
+// watch is a small, low-rate safety net for accounts where Telegram delivers
+// typing but delays/omits UpdateNewChannelMessage after a reconnect.  A new
+// channel post moves that dialog to the top of its folder, so looking at the
+// recent page is vastly cheaper (and safer) than polling every channel.
+const CHANNEL_DIALOG_WATCH_LIMIT = 100;
+const CHANNEL_DIALOG_WATCH_MAIN_INTERVAL_MS = 45000;
+const CHANNEL_DIALOG_WATCH_ARCHIVED_INTERVAL_MS = 90000;
+// Reconnect/manual sync can inspect recent dialogs, but must never fan out to
+// every historical channel a long-lived account has ever seen.
+const MAX_RECONNECT_CHANNEL_RECOVERY = 200;
+/** Per-account channel poll serialization. Key: accountId */
+const channelPollQueues = new Map();
+// Start conservatively, scale only after a sustained healthy run, then back
+// off all the way to one request after Telegram asks us to wait.  This keeps
+// one account/session below the usual MTProto flood threshold while still
+// allowing independent channels to make progress in parallel.
+const CHANNEL_RECOVERY_INITIAL_WORKERS = 2;
+const CHANNEL_RECOVERY_MIN_WORKERS = 1;
+const CHANNEL_RECOVERY_MAX_WORKERS = 4;
+const CHANNEL_RECOVERY_RAMP_AFTER_SUCCESSES = 30;
+const CHANNEL_RECOVERY_CONTINUE_DELAY_MS = 250;
+const channelRecoveryThrottles = new Map();
+const channelRecoveryDrainTimers = new Map();
+const typingChannelRecoveryTimers = new Map();
+const channelDialogWatchStates = new Map();
+const channelDialogWatchTasks = new Map();
+const channelDifferenceQueues = new Map();
+/** Channels explicitly marked by a live PTS gap/server hint or a failed
+ * reconnect recovery. This replaces the old arbitrary first-10 DB scan. */
+// The value is the earliest PTS supplied by UpdateChannelTooLong. Telegram
+// provides it specifically for a channel whose durable cursor is unavailable;
+// keeping it is essential — querying GetFullChannel first would jump to the
+// current cursor and silently discard the offline interval.
+// NOTE: pendingChannelRecoveries was migrated to persistent DB queue
+// (telegram_channel_recovery_queue). The RAM Map is kept only for active
+// channel leases (UI-navigated channels).
+const activeChannelLeases = new Map();
+function getChannelRecoveryThrottle(accountId) {
+    let throttle = channelRecoveryThrottles.get(accountId);
+    if (!throttle) {
+        throttle = {
+            concurrency: CHANNEL_RECOVERY_INITIAL_WORKERS,
+            successfulRequests: 0,
+            cooldownUntil: 0,
+        };
+        channelRecoveryThrottles.set(accountId, throttle);
+    }
+    return throttle;
+}
+function getFloodWaitMs(error) {
+    const message = String(error?.errorMessage || error?.message || error || '');
+    const match = message.match(/FLOOD_WAIT_?(\d+)/i) || message.match(/FLOOD_WAIT\D+(\d+)/i);
+    return Math.max(1000, (match ? Number(match[1]) : 30) * 1000);
+}
+function recordChannelRecoverySuccess(accountId) {
+    const throttle = getChannelRecoveryThrottle(accountId);
+    if (throttle.cooldownUntil > Date.now())
+        return;
+    throttle.successfulRequests++;
+    if (throttle.successfulRequests >= CHANNEL_RECOVERY_RAMP_AFTER_SUCCESSES
+        && throttle.concurrency < CHANNEL_RECOVERY_MAX_WORKERS) {
+        throttle.concurrency++;
+        throttle.successfulRequests = 0;
+        Logger_1.default.log(`[TelegramUserListener] Channel recovery concurrency increased to ${throttle.concurrency} for ${accountId}`);
+    }
+}
+function applyChannelRecoveryFloodWait(accountId, error) {
+    const throttle = getChannelRecoveryThrottle(accountId);
+    const waitMs = getFloodWaitMs(error);
+    throttle.cooldownUntil = Math.max(throttle.cooldownUntil, Date.now() + waitMs);
+    throttle.successfulRequests = 0;
+    throttle.concurrency = Math.max(CHANNEL_RECOVERY_MIN_WORKERS, Math.floor(throttle.concurrency / 2));
+    Logger_1.default.warn(`[TelegramUserListener] Channel recovery paused ${Math.ceil(waitMs / 1000)}s for ${accountId}; concurrency=${throttle.concurrency}`);
+    return waitMs;
+}
+function schedulePendingChannelRecovery(listener) {
+    const accountId = listener.account.accountId;
+    if (listener.stopped || !listener.client?.connected)
+        return;
+    const db = DatabaseService_1.default.getInstance();
+    if (!db)
+        return;
+    // A full reconnect catch-up can take minutes for accounts with many old
+    // channels. During that period continue only the live PTS-gap lane; the
+    // ordinary pending queue remains owned by the reconnect worker.
+    if (recoveringUpdateAccounts.has(accountId)) {
+        if (!db.hasPendingUrgentChannelRecovery(accountId))
+            return;
+    }
+    else if (db.getChannelRecoveryStats(accountId).pending <= 0) {
+        return;
+    }
+    if (channelRecoveryDrainTimers.has(accountId))
+        return;
+    const throttle = getChannelRecoveryThrottle(accountId);
+    const delay = Math.max(CHANNEL_RECOVERY_CONTINUE_DELAY_MS, throttle.cooldownUntil > Date.now() ? throttle.cooldownUntil - Date.now() + CHANNEL_RECOVERY_CONTINUE_DELAY_MS : 0);
+    const timer = setTimeout(() => {
+        channelRecoveryDrainTimers.delete(accountId);
+        pollChannelUpdates(listener).catch(() => { });
+    }, delay);
+    channelRecoveryDrainTimers.set(accountId, timer);
+}
+/**
+ * Active conversations bypass the normal folder queue, newest active first.
+ * They are a small bounded set and must not let an open topic wait behind a
+ * long reconnect backlog.
+ */
+function getActiveChannelRecoveryOrder(accountId) {
+    const leases = activeChannelLeases.get(accountId);
+    if (!leases)
+        return [];
+    const now = Date.now();
+    for (const [channelId, expiresAt] of leases) {
+        if (expiresAt <= now)
+            leases.delete(channelId);
+    }
+    return [...leases.keys()].reverse();
+}
+function touchActiveChannel(accountId, channelId) {
+    if (!channelId.startsWith('-100'))
+        return;
+    const leases = activeChannelLeases.get(accountId) || new Map();
+    // Map insertion order acts as a small LRU.
+    leases.delete(channelId);
+    leases.set(channelId, Date.now() + ACTIVE_CHANNEL_LEASE_MS);
+    while (leases.size > MAX_ACTIVE_CHANNELS_PER_ACCOUNT) {
+        const oldest = leases.keys().next().value;
+        if (!oldest)
+            break;
+        leases.delete(oldest);
+    }
+    activeChannelLeases.set(accountId, leases);
+    const listener = activeListeners.get(accountId);
+    if (listener?.client?.connected && !listener.stopped) {
+        pollChannelUpdates(listener).catch(() => { });
+    }
+}
+/** A `member` default on a newly-created contact is not trustworthy. Only a
+ * state written from a dialog/entity reconciliation can authorize background
+ * channel recovery when a raw update does not carry a full Channel entity. */
+function hasVerifiedTelegramChannelMembership(accountId, channelId) {
+    const db = DatabaseService_1.default.getInstance();
+    const row = db?.queryOne(`SELECT telegram_membership_state, telegram_state_updated_at FROM contacts
+     WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, [accountId, channelId]);
+    return row?.telegram_membership_state === 'member'
+        && Number(row?.telegram_state_updated_at || 0) > 0;
+}
+/**
+ * Inspect only the leading dialogs in a folder and queue a difference only
+ * when Telegram's dialog cursor proves that the local channel cursor/message
+ * checkpoint is behind.  This deliberately does not call getMessages: the
+ * per-channel difference drain remains the single persistence path.
+ *
+ * Main is examined before Archived/"Khác" and more often.  That mirrors the
+ * UI/reconnect priority without leaving Archived dialogs permanently reliant
+ * on the user opening them to obtain an active lease.
+ */
+function refreshRecentChannelDialogWatch(listener) {
+    const accountId = listener.account.accountId;
+    if (listener.stopped || listener.client?.connected !== true)
+        return;
+    if (channelDialogWatchTasks.has(accountId))
+        return;
+    const state = channelDialogWatchStates.get(accountId) || { nextMainAt: 0, nextArchivedAt: 0 };
+    const now = Date.now();
+    const inspectMain = now >= state.nextMainAt;
+    const inspectArchived = now >= state.nextArchivedAt;
+    if (!inspectMain && !inspectArchived)
+        return;
+    if (inspectMain)
+        state.nextMainAt = now + CHANNEL_DIALOG_WATCH_MAIN_INTERVAL_MS;
+    if (inspectArchived)
+        state.nextArchivedAt = now + CHANNEL_DIALOG_WATCH_ARCHIVED_INTERVAL_MS;
+    channelDialogWatchStates.set(accountId, state);
+    const task = (async () => {
+        const db = DatabaseService_1.default.getInstance();
+        const client = listener.client;
+        if (!db || !client || listener.stopped || listener.client !== client || !client.connected)
+            return;
+        let inspected = 0;
+        let queuedMain = 0;
+        let queuedArchived = 0;
+        let stateChanged = false;
+        const inspectFolder = async (folder) => {
+            const dialogs = folder === 1
+                ? await client.getDialogs({ limit: CHANNEL_DIALOG_WATCH_LIMIT, folder: 1 })
+                : await client.getDialogs({ limit: CHANNEL_DIALOG_WATCH_LIMIT });
+            for (const dialog of dialogs) {
+                if (listener.stopped || listener.client !== client || !client.connected)
+                    return;
+                const channelId = getCanonicalChatId(dialog.id);
+                if (!channelId.startsWith('-100'))
+                    continue;
+                inspected++;
+                if (dialog.entity)
+                    cacheTelegramPeer(accountId, channelId, dialog.entity);
+                // Keep dialog membership/folder metadata fresh but avoid a renderer
+                // refresh for every row. One refresh below is enough for this pass.
+                persistTelegramDialogState(accountId, channelId, dialog, dialog.entity, undefined, false);
+                stateChanged = true;
+                if (!hasVerifiedTelegramChannelMembership(accountId, channelId))
+                    continue;
+                const localPts = Math.max(0, Number(db.getTelegramChannelPts(accountId, channelId) || 0));
+                const serverPts = Math.max(0, Number(dialog?.dialog?.pts ?? dialog?.pts ?? 0));
+                const localMessageId = getTelegramHistoryCheckpoint(db, accountId, channelId);
+                const topMessageId = Math.max(0, Number(dialog?.dialog?.topMessage ?? dialog?.topMessage ?? 0));
+                // A dialog may not expose PTS in every GramJS shape.  Its top message
+                // is still an authoritative, cheap indication that a difference must
+                // be drained. Do not queue an unchanged dialog merely because one of
+                // the optional fields is absent.
+                const needsDifference = (serverPts > 0 && serverPts > localPts)
+                    || (topMessageId > 0 && topMessageId > localMessageId);
+                if (!needsDifference)
+                    continue;
+                // This is a current-server cursor/top-message signal, not a broad
+                // historical scan. Put it in the live lane so reconnect catch-up
+                // cannot make a recently active Archived dialog wait behind thousands
+                // of old rows. Main still wins over Khác when both are pending.
+                markChannelRecoveryPending(accountId, channelId, URGENT_CHANNEL_RECOVERY_PRIORITY + (folder === 0 ? 10 : 0));
+                if (folder === 0)
+                    queuedMain++;
+                else
+                    queuedArchived++;
+            }
+        };
+        // Preserve the product priority: exhaust the recent All page before
+        // touching Khác. The DB queue applies the same folder ordering while
+        // draining the resulting difference requests.
+        if (inspectMain)
+            await inspectFolder(0);
+        if (inspectArchived)
+            await inspectFolder(1);
+        if (stateChanged) {
+            EventBroadcaster_1.default.emit('db:unreadChanged', { zaloId: accountId, source: 'telegram_dialog_watch' });
+        }
+        Logger_1.default.log(`[TelegramUserListener] Dialog watch inspected ${inspected} channels; queued ${queuedMain} All and ${queuedArchived} Khác for ${accountId}`);
+        if (queuedMain || queuedArchived) {
+            schedulePendingChannelRecovery(listener);
+        }
+    })().catch((err) => {
+        Logger_1.default.warn(`[TelegramUserListener] Dialog watch failed for ${accountId}: ${err.message}`);
+    }).finally(() => {
+        if (channelDialogWatchTasks.get(accountId) === task)
+            channelDialogWatchTasks.delete(accountId);
+    });
+    channelDialogWatchTasks.set(accountId, task);
+}
+function markChannelRecoveryPending(accountId, channelId, priority = 0) {
+    const db = DatabaseService_1.default.getInstance();
+    if (!db || !hasVerifiedTelegramChannelMembership(accountId, channelId))
+        return;
+    // Try to get access_hash from peer cache for the queue
+    const peer = db.getTelegramPeer(accountId, channelId);
+    const accessHash = peer?.access_hash || '';
+    // Queue only the last cursor that we durably committed after processing
+    // messages.  The PTS on UpdateChannelTooLong is Telegram's current cursor,
+    // not a safe recovery start; persisting it here would skip missed updates.
+    const durablePts = Math.max(0, Number(db.getTelegramChannelPts(accountId, channelId) || 0));
+    db.enqueueChannelRecovery(accountId, channelId, accessHash, durablePts, priority);
+}
+function clearChannelRecoveryPending(accountId, channelId) {
+    const db = DatabaseService_1.default.getInstance();
+    if (!db)
+        return;
+    // Live priority is a one-shot scheduling hint. Retaining it after a
+    // successful recovery would turn every historic channel into “urgent” on
+    // the next reconnect and recreate the starvation this queue is meant to
+    // prevent.
+    db.completeChannelRecovery(accountId, channelId);
+}
+function requestChannelRecovery(listener, channelId, reason) {
+    if (!hasVerifiedTelegramChannelMembership(listener.account.accountId, channelId)) {
+        tgChannelRealtimeTrace('RECOVERY_SKIPPED_NON_MEMBER', listener.account.accountId, { chatId: channelId, reason });
+        return;
+    }
+    // A live PTS gap or Telegram's explicit TooLong hint must not wait for the
+    // normal folder backlog: it represents a known missing interval.
+    markChannelRecoveryPending(listener.account.accountId, channelId, URGENT_CHANNEL_RECOVERY_PRIORITY);
+    // This is intentionally a normal log (rather than verbose ingress output):
+    // it is emitted only for a real cursor gap/TooLong signal and makes it
+    // possible to distinguish a Telegram delivery issue from a stuck recovery
+    // queue in field logs.
+    Logger_1.default.log(`[TelegramUserListener] Live channel recovery queued for ${channelId} (${reason})`);
+    // Do not defer a live PTS gap behind the reconnect/history backlog. The
+    // poller selects only urgent rows while that backlog owns the normal queue.
+    pollChannelUpdates(listener).catch((err) => {
+        // tgLog('warn', listener.account.accountId, 'channel_difference', `Recovery queue failed: ${err.message}`, { chatId: channelId });
+    });
+}
+/**
+ * A channel typing update proves that the primary MTProto socket is live for
+ * that peer. Telegram may still omit/delay its companion NewChannelMessage
+ * after a reconnect. Debounce a single difference probe so supergroups and
+ * forum topics catch up without waiting for the user to open the chat.
+ */
+function scheduleTypingChannelRecovery(listener, channelId) {
+    if (!hasVerifiedTelegramChannelMembership(listener.account.accountId, channelId))
+        return;
+    touchActiveChannel(listener.account.accountId, channelId);
+    const key = `${listener.account.accountId}:${channelId}`;
+    const previous = typingChannelRecoveryTimers.get(key);
+    if (previous)
+        clearTimeout(previous);
+    const timer = setTimeout(() => {
+        typingChannelRecoveryTimers.delete(key);
+        if (listener.stopped || listener.client?.connected !== true)
+            return;
+        requestChannelRecovery(listener, channelId, 'channel_typing_followup');
+    }, 1500);
+    typingChannelRecoveryTimers.set(key, timer);
+    tgChannelRealtimeTrace('TYPING_CATCHUP_SCHEDULED', listener.account.accountId, { chatId: channelId });
+}
+function startChannelPoller(listener) {
+    if (listener.channelPollTimer)
+        clearInterval(listener.channelPollTimer);
+    // Do not make a freshly connected Archived dialog wait for the first
+    // 15-second interval before its fallback watch begins.
+    refreshRecentChannelDialogWatch(listener);
+    listener.channelPollTimer = setInterval(() => {
+        if (listener.stopped || !listener.client?.connected)
+            return;
+        pollChannelUpdates(listener).catch(() => { });
+    }, CHANNEL_POLL_INTERVAL_MS);
+}
+function stopChannelPoller(listener) {
+    if (listener.channelPollTimer) {
+        clearInterval(listener.channelPollTimer);
+        listener.channelPollTimer = null;
+    }
+    // Clean up in-flight queue for this account
+    channelPollQueues.delete(listener.account.accountId);
+}
+/** Phase E: Serialize channel polls per account — no global lock. */
+async function pollChannelUpdates(listener) {
+    const accountId = listener.account.accountId;
+    // Per-account serialization: skip if previous poll for this account is still running
+    const existing = channelPollQueues.get(accountId);
+    if (existing)
+        return;
+    const task = pollChannelUpdatesNow(listener);
+    channelPollQueues.set(accountId, task);
+    try {
+        await task;
+    }
+    finally {
+        if (channelPollQueues.get(accountId) === task)
+            channelPollQueues.delete(accountId);
+        // An urgent row can have arrived while this account's previous poll was
+        // draining. Re-check after releasing the serialization lock so it is not
+        // stranded until the next 15-second timer (or until manual refresh).
+        schedulePendingChannelRecovery(listener);
+    }
+}
+/**
+ * Recover one independent channel. PTS is serialized inside
+ * drainChannelDifference per channel, while callers may process different
+ * channels concurrently through the bounded account worker pool below.
+ */
+async function recoverQueuedChannel(accountId, client, queued, source) {
+    const db = DatabaseService_1.default.getInstance();
+    if (!db)
+        return 'retry';
+    const channelId = queued.channel_id;
+    // Even an active-view poll needs a durable history boundary while its RPC
+    // is in flight: realtime can arrive before a TooLong response comes back.
+    if (queued.queued === false)
+        markChannelRecoveryPending(accountId, channelId);
+    db.preserveChannelRecoveryHistoryStart(accountId, channelId);
+    const peer = db.getTelegramPeer(accountId, channelId);
+    let accessHash = peer?.access_hash || queued.access_hash;
+    if (!accessHash) {
+        const resolved = await repairAccessHash(accountId, client, channelId, peer);
+        accessHash = db.getTelegramPeer(accountId, channelId)?.access_hash || '';
+        if (!resolved || !accessHash) {
+            tgLog('warn', accountId, source, `No access_hash for ${channelId}, skipping`);
+            db.updateChannelRecoveryStatus(accountId, channelId, 'failed', { lastError: 'missing_access_hash' });
+            return 'complete';
+        }
+    }
+    // `telegram_channel_pts` is the sole durable cursor.  A value carried by
+    // UpdateChannelTooLong describes Telegram's *current* state, not our last
+    // successfully persisted state; using it as a fallback can silently skip
+    // the very interval the recovery was queued for.  Bootstrap an unseeded
+    // channel from pts=0 instead.  GetChannelDifference will return either an
+    // authoritative empty cursor, normal differences, or TooLong together with
+    // dialog.pts after the history snapshot has been persisted.
+    const currentPts = Math.max(0, Number(db.getTelegramChannelPts(accountId, channelId) || 0));
+    try {
+        db.updateChannelRecoveryStatus(accountId, channelId, 'draining');
+        const recovered = await drainChannelDifference(accountId, client, channelId, accessHash, currentPts, source);
+        if (recovered === 'complete' || recovered === 'unavailable') {
+            clearChannelRecoveryPending(accountId, channelId);
+            if (queued.priority >= URGENT_CHANNEL_RECOVERY_PRIORITY) {
+                // Logger.log(`[TelegramUserListener] Live channel recovery completed for ${channelId}`);
+            }
+            return 'complete';
+        }
+        // drainChannelDifference handles FLOOD_WAIT internally and persists its
+        // retry_at. Read it back so this worker pool pauses globally instead of
+        // continuing other channel history/difference requests during the wait.
+        const retry6 = db.queryOne(`SELECT retry_at FROM telegram_channel_recovery_queue
+       WHERE owner_zalo_id = ? AND channel_id = ?`, [accountId, channelId]);
+        if (Number(retry6?.retry_at || 0) > Date.now()) {
+            const waitMs = Math.max(1000, Number(retry6.retry_at) - Date.now());
+            applyChannelRecoveryFloodWait(accountId, new Error(`FLOOD_WAIT_${Math.ceil(waitMs / 1000)}`));
+            return 'flood';
+        }
+        // A recoverable, non-flood incomplete result must return the durable row
+        // to pending. enqueueChannelRecovery intentionally preserves `draining`
+        // rows, so using it here would leave this channel stuck forever.
+        db.updateChannelRecoveryStatus(accountId, channelId, 'pending', {
+            pts: currentPts,
+            lastError: 'channel_difference_incomplete',
+        });
+        return 'retry';
+    }
+    catch (err) {
+        if (String(err?.message || '').includes('FLOOD_WAIT')) {
+            const waitMs = applyChannelRecoveryFloodWait(accountId, err);
+            db.updateChannelRecoveryStatus(accountId, channelId, 'pending', {
+                retryAt: Date.now() + waitMs,
+                lastError: err.message,
+            });
+            tgLog('warn', accountId, source, `FLOOD_WAIT ${Math.ceil(waitMs / 1000)}s for ${channelId}`);
+            return 'flood';
+        }
+        tgLog('warn', accountId, source, `Channel ${channelId} error: ${err.message}`);
+        db.updateChannelRecoveryStatus(accountId, channelId, 'pending', { lastError: err.message });
+        return 'retry';
+    }
+}
+async function runChannelRecoveryWorkers(listener, client, items, source) {
+    if (!items.length)
+        return;
+    const accountId = listener.account.accountId;
+    const throttle = getChannelRecoveryThrottle(accountId);
+    if (throttle.cooldownUntil > Date.now())
+        return;
+    let nextIndex = 0;
+    let stopForFlood = false;
+    const worker = async () => {
+        while (!stopForFlood && !listener_stopped(accountId)) {
+            const item = items[nextIndex++];
+            if (!item)
+                return;
+            const outcome = await recoverQueuedChannel(accountId, client, item, source);
+            if (outcome === 'flood') {
+                stopForFlood = true;
+                return;
+            }
+            if (outcome === 'complete')
+                recordChannelRecoverySuccess(accountId);
+        }
+    };
+    const workerCount = Math.min(throttle.concurrency, items.length);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+}
+async function pollChannelUpdatesNow(listener) {
+    const accountId = listener.account.accountId;
+    const client = listener.client;
+    if (!client)
+        return;
+    const db = DatabaseService_1.default.getInstance();
+    if (!db)
+        return;
+    const reconnectRecoveryActive = recoveringUpdateAccounts.has(accountId);
+    try {
+        // Socket updates are still authoritative realtime. This lightweight
+        // folder-aware dialog observation only supplies a recovery hint when a
+        // channel update was not delivered by the socket (most visibly Archived /
+        // "Khác" dialogs after reconnect). It runs independently so it never
+        // blocks a live PTS-gap worker.
+        refreshRecentChannelDialogWatch(listener);
+        const throttle = getChannelRecoveryThrottle(accountId);
+        if (throttle.cooldownUntil > Date.now()) {
+            schedulePendingChannelRecovery(listener);
+            return;
+        }
+        // While the reconnect pass owns the normal queue, this poller runs a
+        // separate urgent lane for live PTS gaps/TooLong updates. This keeps
+        // supergroups, channels and forum topics realtime even with a very large
+        // historical recovery backlog.
+        const queuedChannels = (reconnectRecoveryActive
+            ? db.dequeueUrgentChannelRecovery(accountId, 20)
+            : db.dequeueChannelRecovery(accountId, 50));
+        if (reconnectRecoveryActive && queuedChannels.length === 0)
+            return;
+        // Active-channel leases are useful for normal backlog ordering, but must
+        // not let an open conversation steal a non-urgent row while reconnect
+        // recovery is processing the durable queue.
+        const activeChannelIds = reconnectRecoveryActive ? [] : getActiveChannelRecoveryOrder(accountId);
+        const activeChannelSet = new Set(activeChannelIds);
+        const queuedById = new Map();
+        for (const c of queuedChannels) {
+            queuedById.set(c.channel_id, c);
+        }
+        const workItems = [
+            ...activeChannelIds.map(channelId => queuedById.get(channelId) || {
+                channel_id: channelId,
+                access_hash: '',
+                pts: db.getTelegramChannelPts(accountId, channelId),
+                priority: URGENT_CHANNEL_RECOVERY_PRIORITY,
+                attempts: 0,
+                queued: false,
+            }),
+            ...queuedChannels.filter(channel => !activeChannelSet.has(channel.channel_id)),
+        ];
+        await runChannelRecoveryWorkers(listener, client, workItems, 'poll');
+        // Drain the next batch immediately while there is a reconnect backlog;
+        // the 15-second poll interval remains the idle/realtime safety net.
+        schedulePendingChannelRecovery(listener);
+    }
+    catch (err) {
+        tgLog('warn', accountId, 'poll', `pollChannelUpdates error: ${err.message}`);
+    }
+}
+// ─── Phase D: Per-channel PTS drain (commit-after-success) ──────────────────
+/** Drain channel difference for a single channel. Handles all three result
+ *  variants (Empty/Difference/TooLong), respects final flag, and only commits
+ *  PTS after successful processing of the entire batch. */
+async function drainChannelDifference(accountId, client, channelId, accessHash, startingPts, source) {
+    const queueKey = `${accountId}:${channelId}`;
+    const existing = channelDifferenceQueues.get(queueKey);
+    // TG-04: single-flight is per (account, channel, *client generation*).
+    // Handing a pending promise from a retired client to the new one meant the
+    // fresh connection sat waiting on an RPC that would never come back after
+    // the transport was torn down.
+    if (existing && existing.client === client)
+        return existing.promise;
+    const task = drainChannelDifferenceNow(accountId, client, channelId, accessHash, startingPts, source);
+    const entry = { client, promise: task };
+    channelDifferenceQueues.set(queueKey, entry);
+    try {
+        return await task;
+    }
+    finally {
+        // Only clear our own entry; a newer client may already own the key.
+        if (channelDifferenceQueues.get(queueKey) === entry)
+            channelDifferenceQueues.delete(queueKey);
+    }
+}
+/**
+ * `channelDifferenceTooLong` means the PTS interval can no longer be obtained
+ * as normal updates. Before accepting its newest snapshot, replay the bounded
+ * message-ID range after our durable checkpoint. Otherwise committing
+ * dialog.pts would turn every older missed message into a permanent gap.
+ *
+ * Fetch history oldest first in bounded pages; commit each page's boundary
+ * only after persistence succeeds so retries cannot skip a partial backlog.
+ */
+async function backfillChannelTooLongHistory(accountId, client, inputChannel, channelId, entities, includeInitialSnapshot = false) {
+    const db = DatabaseService_1.default.getInstance();
+    if (!db)
+        return { complete: false, failed: true };
+    db.preserveChannelRecoveryHistoryStart(accountId, channelId);
+    const minId = getTelegramHistoryCheckpoint(db, accountId, channelId);
+    // Keep individual history requests small. GramJS's iterator applies its own
+    // wait policy only for very large limits, which currently produces a
+    // negative timeout on the first chunk and causes bursty requests/flood waits.
+    // We still recover up to 5,000 messages, but do it as paced 100-message pages.
+    const BACKFILL_LIMIT = 5000;
+    const BACKFILL_PAGE_SIZE = 100;
+    const BACKFILL_PAGE_DELAY_MS = 1000;
+    try {
+        const allMessages = [];
+        let historyCursor = minId;
+        let reachedHistoryEnd = false;
+        if (minId <= 0) {
+            // The only safe option without a checkpoint is a bounded first load.
+            // `channelDifferenceTooLong` already supplies such a snapshot, whereas
+            // a bare UpdateChannelTooLong needs us to request one explicitly.
+            if (!includeInitialSnapshot)
+                return { complete: true, failed: false };
+            allMessages.push(...await client.getMessages(inputChannel, { limit: INITIAL_MESSAGES_PER_DIALOG }));
+            allMessages.sort((a, b) => Number(a?.id || 0) - Number(b?.id || 0));
+        }
+        else {
+            // Paginate explicitly instead of asking GramJS for 5,000 items at once.
+            // `getMessages` delegates to its iterator, so a large limit here would
+            // recreate the negative-timer issue seen during ChannelDifferenceTooLong.
+            while (allMessages.length < BACKFILL_LIMIT) {
+                const pageLimit = Math.min(BACKFILL_PAGE_SIZE, BACKFILL_LIMIT - allMessages.length);
+                const opts = {
+                    limit: pageLimit,
+                    reverse: true,
+                    minId: historyCursor,
+                };
+                const batch = await client.getMessages(inputChannel, opts);
+                if (batch.length === 0) {
+                    reachedHistoryEnd = true;
+                    break;
+                }
+                const page = batch.filter(message => Number(message.id) > historyCursor)
+                    .sort((a, b) => Number(a.id) - Number(b.id));
+                if (!page.length)
+                    return { complete: false, failed: true };
+                // Persist oldest first and only advance the recovery boundary after
+                // the entire page succeeds. A retry resumes beyond this page, never
+                // beyond an unrelated high-ID message delivered by the live socket.
+                await processDifferenceMessages(accountId, client, page, entities, 'history');
+                historyCursor = Number(page[page.length - 1].id);
+                db.run(`UPDATE telegram_channel_recovery_queue SET history_start_msg_id = ?
+                WHERE owner_zalo_id = ? AND channel_id = ? AND status IN ('pending', 'draining')`, [historyCursor, accountId, channelId]);
+                allMessages.push(...page);
+                // If we got fewer than requested, we're done
+                if (batch.length < pageLimit) {
+                    reachedHistoryEnd = true;
+                    break;
+                }
+                // Match the safe pacing GramJS intended for very large collections,
+                // without relying on its broken first-iteration timeout calculation.
+                if (allMessages.length < BACKFILL_LIMIT) {
+                    await new Promise(resolve => setTimeout(resolve, BACKFILL_PAGE_DELAY_MS));
+                }
+            }
+        }
+        if (minId <= 0 && allMessages.length > 0) {
+            // Sort by ID to ensure chronological order
+            allMessages.sort((a, b) => Number(a?.id || 0) - Number(b?.id || 0));
+            await processDifferenceMessages(accountId, client, allMessages, entities, 'history');
+        }
+        // Update the last message ID checkpoint for future recovery
+        if (allMessages.length > 0) {
+            const maxMsgId = Math.max(...allMessages.map((m) => Number(m?.id || 0)));
+            db.updateChannelRecoveryStatus(accountId, channelId, 'pending', { lastMsgId: maxMsgId });
+        }
+        return {
+            complete: minId <= 0 || reachedHistoryEnd,
+            failed: false,
+        };
+    }
+    catch (err) {
+        // Handle flood wait gracefully
+        if (err.message?.includes('FLOOD_WAIT')) {
+            const waitMatch = err.message.match(/(\d+)/);
+            const waitSec = waitMatch ? parseInt(waitMatch[1]) : 30;
+            tgLog('warn', accountId, 'channel_difference', `TooLong backfill FLOOD_WAIT ${waitSec}s for ${channelId}`);
+            db.updateChannelRecoveryStatus(accountId, channelId, 'pending', {
+                retryAt: Date.now() + waitSec * 1000,
+                lastError: err.message,
+            });
+            return { complete: false, failed: false }; // Not failed, just throttled
+        }
+        tgLog('warn', accountId, 'channel_difference', `TooLong history backfill failed for ${channelId}: ${err.message}`);
+        return { complete: false, failed: true };
+    }
+}
+/**
+ * Telegram rejects GetChannelDifference with PERSISTENT_TIMESTAMP_EMPTY for
+ * some channels that have no usable server-side persistent cursor (commonly
+ * a newly discovered/legacy channel with local PTS=0). Retrying the exact
+ * same RPC can never repair that state and used to occupy a live worker every
+ * 250ms. Establish a snapshot PTS first, backfill history up to that
+ * checkpoint, then commit it. A message arriving after the snapshot remains
+ * visible to the next normal difference, so this does not discard realtime.
+ */
+async function bootstrapPersistentTimestampEmptyChannel(accountId, client, inputChannel, channelId, source) {
+    const { Api } = require('telegram');
+    const db = DatabaseService_1.default.getInstance();
+    if (!db)
+        return 'retry';
+    try {
+        const full = await client.invoke(new Api.channels.GetFullChannel({ channel: inputChannel }));
+        const snapshotPts = Math.max(0, Number(full?.fullChat?.pts || 0));
+        if (snapshotPts <= 0) {
+            // There is no cursor to establish. Treat this peer as unavailable for
+            // the current pass rather than spinning the same rejected RPC forever;
+            // a future socket update may enqueue it again with a real PTS.
+            tgLog('warn', accountId, source, `PERSISTENT_TIMESTAMP_EMPTY without ChannelFull.pts for ${channelId}; stopping this recovery pass`);
+            return 'unavailable';
+        }
+        const entities = cacheDifferenceEntities(accountId, full?.users || [], full?.chats || []);
+        const history = await backfillChannelTooLongHistory(accountId, client, inputChannel, channelId, entities, true);
+        if (history.complete && !history.failed) {
+            db.saveTelegramChannelPts(accountId, channelId, snapshotPts);
+            Logger_1.default.log(`[TelegramUserListener] Bootstrapped PTS=${snapshotPts} after PERSISTENT_TIMESTAMP_EMPTY for ${channelId}`);
+            return 'complete';
+        }
+        // A backfill FLOOD_WAIT has already installed a server-authorized retry
+        // time and must keep the normal global throttle behavior. Any other
+        // failure is local to this peer: finishing this pass is safer than adding
+        // a retry_at which recoverQueuedChannel would interpret as a global flood
+        // and use to block every unrelated channel.
+        const pending = db.queryOne(`SELECT retry_at FROM telegram_channel_recovery_queue
+       WHERE owner_zalo_id = ? AND channel_id = ?`, [accountId, channelId]);
+        if (Number(pending?.retry_at || 0) > Date.now())
+            return 'retry';
+        tgLog('warn', accountId, source, `PERSISTENT_TIMESTAMP history incomplete for ${channelId}; stopping this recovery pass`);
+        return 'unavailable';
+    }
+    catch (err) {
+        const message = String(err?.message || err || 'unknown error');
+        const unavailable = /CHANNEL_(?:PRIVATE|INVALID)|USER_BANNED_IN_CHANNEL/.test(message);
+        if (unavailable)
+            return 'unavailable';
+        tgLog('warn', accountId, source, `PERSISTENT_TIMESTAMP bootstrap failed for ${channelId}: ${message}`);
+        return 'unavailable';
+    }
+}
+async function drainChannelDifferenceNow(accountId, client, channelId, accessHash, startingPts, source) {
+    const { Api } = require('telegram');
+    const db = DatabaseService_1.default.getInstance();
+    if (!db)
+        return 'retry';
+    const numericId = String(channelId).replace(/^-100/, '');
+    const inputChannel = new Api.InputChannel({
+        channelId: BigInt(numericId),
+        accessHash: BigInt(accessHash),
+    });
+    let currentPts = startingPts;
+    const MAX_SLICES = 50; // Increased from 10 — large channels need more drain iterations
+    for (let slice = 0; slice < MAX_SLICES; slice++) {
+        let diff;
+        try {
+            diff = await client.invoke(new Api.updates.GetChannelDifference({
+                channel: inputChannel,
+                filter: new Api.ChannelMessagesFilterEmpty(),
+                pts: currentPts,
+                limit: 100,
+                force: false,
+            }));
+        }
+        catch (err) {
+            // Flood wait: schedule retry at the exact time Telegram allows
+            if (err.message?.includes('FLOOD_WAIT')) {
+                const waitMatch = err.message.match(/(\d+)/);
+                const waitSec = waitMatch ? parseInt(waitMatch[1]) : 30;
+                tgLog('warn', accountId, source, `FLOOD_WAIT ${waitSec}s for ${channelId}`);
+                db.updateChannelRecoveryStatus(accountId, channelId, 'pending', {
+                    retryAt: Date.now() + waitSec * 1000,
+                    lastError: err.message,
+                });
+                return 'retry';
+            }
+            if (String(err?.message || '').includes('PERSISTENT_TIMESTAMP_EMPTY')) {
+                return bootstrapPersistentTimestampEmptyChannel(accountId, client, inputChannel, channelId, source);
+            }
+            // These errors are terminal for this peer. Keeping them in the pending
+            // queue makes reconnect/poll spam forever after the user leaves a group.
+            const unavailable = /CHANNEL_(?:PRIVATE|INVALID)|USER_BANNED_IN_CHANNEL/.test(err.message || '');
+            if (!unavailable) {
+                tgLog('warn', accountId, source, `getChannelDifference failed for ${channelId}: ${err.message}`);
+            }
+            return unavailable ? 'unavailable' : 'retry'; // Don't commit PTS on failure
+        }
+        // ── ChannelDifferenceEmpty: no new updates ────────────────────────
+        if (diff instanceof Api.updates.ChannelDifferenceEmpty) {
+            // P1.2 fix: commit PTS from ChannelDifferenceEmpty
+            const emptyPts = Number(diff.pts || 0);
+            if (emptyPts > 0) {
+                db.saveTelegramChannelPts(accountId, channelId, emptyPts);
+            }
+            // tgLog('info', accountId, source, `ChannelDifferenceEmpty for ${channelId}`, { pts: emptyPts });
+            return 'complete';
+        }
+        // ── ChannelDifferenceTooLong: snapshot, use dialog.pts ────────────
+        if (diff instanceof Api.updates.ChannelDifferenceTooLong) {
+            tgLog('warn', accountId, source, `ChannelDifferenceTooLong for ${channelId}`);
+            const entities = cacheDifferenceEntities(accountId, diff.users || [], diff.chats || []);
+            // Telegram cannot return the old PTS interval here. Fill it by message
+            // ID first; do not process/commit the newest snapshot until that bounded
+            // range is complete, or its high IDs would hide the remaining gap.
+            const history = await backfillChannelTooLongHistory(accountId, client, inputChannel, channelId, entities);
+            if (history.failed || !history.complete) {
+                return 'retry';
+            }
+            // Process the server's latest snapshot before committing its cursor.
+            const messages = diff.messages || [];
+            let failedCount = 0;
+            for (const msg of messages) {
+                try {
+                    const event = initializeRecoveredMessage(msg, client, entities);
+                    const result = await handleNewMessage(accountId, event, client, source);
+                    if (result.status === 'failed')
+                        failedCount++;
+                }
+                catch (err) {
+                    failedCount++;
+                    tgLog('warn', accountId, source, `TooLong msg failed: ${err.message}`, { msgId: String(msg?.id) });
+                }
+            }
+            // P0.3 fix: PTS comes from dialog.pts, NOT diff.pts
+            const dialogPts = Number(diff.dialog?.pts || 0);
+            if (dialogPts > 0 && failedCount === 0) {
+                db.saveTelegramChannelPts(accountId, channelId, dialogPts);
+                tgLog('info', accountId, source, `TooLong committed dialog.pts=${dialogPts} for ${channelId}`);
+            }
+            else if (failedCount > 0) {
+                tgLog('warn', accountId, source, `TooLong: ${failedCount} msgs failed, NOT committing PTS for ${channelId}`);
+            }
+            return failedCount === 0 && dialogPts > 0 ? 'complete' : 'retry';
+        }
+        // ── ChannelDifference: normal incremental update ──────────────────
+        if (diff instanceof Api.updates.ChannelDifference) {
+            // Cache entities first
+            const entities = cacheDifferenceEntities(accountId, diff.users || [], diff.chats || []);
+            // Process new messages — initialize with entities so getChat() works
+            const messages = diff.newMessages || [];
+            let failedCount = 0;
+            for (const msg of messages) {
+                try {
+                    const event = initializeRecoveredMessage(msg, client, entities);
+                    const result = await handleNewMessage(accountId, event, client, source);
+                    if (result.status === 'failed')
+                        failedCount++;
+                }
+                catch (err) {
+                    failedCount++;
+                    tgLog('warn', accountId, source, `Difference msg failed: ${err.message}`, { msgId: String(msg?.id) });
+                }
+            }
+            // Process otherUpdates (edits, deletes, reactions, etc.)
+            const rawHandler = rawUpdateHandlers.get(accountId);
+            if (rawHandler) {
+                for (const update of diff.otherUpdates || []) {
+                    try {
+                        await rawHandler(update);
+                    }
+                    catch (err) {
+                        failedCount++;
+                        tgLog('warn', accountId, source, `otherUpdate failed: ${err.message}`);
+                    }
+                }
+            }
+            // P0.2 fix: Only commit PTS after ALL items processed successfully
+            const newPts = Number(diff.pts || 0);
+            if (failedCount === 0 && newPts > 0) {
+                db.saveTelegramChannelPts(accountId, channelId, newPts);
+                currentPts = newPts;
+                // tgLog('info', accountId, source, `ChannelDifference committed pts=${newPts} for ${channelId}`, {
+                //   msgs: messages.length,
+                //   otherUpdates: (diff.otherUpdates || []).length,
+                // });
+            }
+            else if (failedCount > 0) {
+                // tgLog('warn', accountId, source, `ChannelDifference: ${failedCount} failed, NOT committing PTS for ${channelId}`);
+                return 'retry'; // Don't continue draining on failure
+            }
+            else {
+                // tgLog('warn', accountId, source, `ChannelDifference returned invalid PTS for ${channelId}`);
+                return 'retry';
+            }
+            // If final=false, drain more slices immediately
+            if (!diff.final) {
+                tgLog('info', accountId, source, `final=false for ${channelId}, draining next slice`);
+                continue;
+            }
+            // final=true — done
+            return 'complete';
+        }
+        // Unknown difference type
+        tgLog('warn', accountId, source, `Unknown diff type for ${channelId}: ${diff?.className}`);
+        return 'retry';
+    }
+    tgLog('warn', accountId, source, `Drain slice limit reached for ${channelId}`);
+    return 'retry';
+}
+async function connectListener(listener) {
+    if (listener.connecting)
+        return listener.connecting;
+    const connecting = connectListenerNow(listener);
+    listener.connecting = connecting;
+    try {
+        await connecting;
+    }
+    finally {
+        if (listener.connecting === connecting)
+            listener.connecting = null;
+    }
+}
+async function connectListenerNow(listener) {
+    const { account } = listener;
+    // Cleanup old client before creating new one
+    const previousClient = listener.client;
+    if (previousClient) {
+        intentionallyDisconnectedClients.add(previousClient);
+        listener.client = null;
+        try {
+            await previousClient.disconnect();
+        }
+        catch { }
+    }
+    clearHealthCheck(listener);
+    stopChannelPoller(listener);
+    const stringSession = new sessions_1.StringSession(account.stringSession);
+    const client = new telegram_1.TelegramClient(stringSession, telegram_config_1.API_ID, telegram_config_1.API_HASH, {
+        connectionRetries: 5,
+    });
+    // GramJS's update loop prints a raw `Error: TIMEOUT` stack after its own
+    // ping retries. The error is expected during a temporary network outage and
+    // GramJS immediately reconnects the sender. Keep diagnostics useful without
+    // leaking a stack or generating several identical lines per outage.
+    client.setLogLevel?.('none');
+    client.onError = async (err) => {
+        if (listener.stopped || listener.client !== client || intentionallyDisconnectedClients.has(client))
+            return;
+        const message = String(err?.errorMessage || err?.message || err || 'unknown error');
+        const transportError = isTelegramTransportError(err);
+        // Do this before rate-limiting diagnostics. A later TIMEOUT in the same
+        // outage must still leave the listener marked offline if an earlier state
+        // event was missed by GramJS.
+        if (transportError) {
+            scheduleReconnect(listener, 'gramjs_transport_error', err);
+        }
+        const now = Date.now();
+        if (now - listener.lastTransportErrorAt < 30000)
+            return;
+        listener.lastTransportErrorAt = now;
+        tgLog('warn', account.accountId, 'socket', transportError
+            ? (/^TIMEOUT$/i.test(message) ? 'PING_TIMEOUT' : 'GRAMJS_TRANSPORT_ERROR')
+            : 'GRAMJS_RPC_ERROR', {
+            // CHANNEL_INVALID/FLOOD_WAIT and similar RPC failures are emitted by
+            // GramJS through the same callback, but must not be presented as a
+            // socket reconnect: the active listener stays healthy in that case.
+            result: transportError ? 'gramjs_auto_reconnect' : 'listener_kept_alive',
+            error: message.slice(0, 160),
+        });
+    };
+    listener.client = client;
+    try {
+        const transportConnected = await client.connect();
+        if (!transportConnected && !client.connected) {
+            throw new Error('MTProto transport failed to connect');
+        }
+        // stopListener may have run while the transport handshake was in flight.
+        if (listener.stopped) {
+            intentionallyDisconnectedClients.add(client);
+            try {
+                await client.disconnect();
+            }
+            catch { }
+            return;
+        }
+        // A live TCP transport is not enough to mark an account online. This
+        // authorized request catches revoked/expired sessions before timers and UI
+        // are started for a client that cannot actually receive account updates.
+        await client.getMe();
+        if (listener.stopped || listener.client !== client) {
+            intentionallyDisconnectedClients.add(client);
+            try {
+                await client.disconnect();
+            }
+            catch { }
+            return;
+        }
+        listener.connected = true;
+        listener.transportDownSince = null;
+        listener.retryCount = 0;
+        listener.stopped = false;
+        const { Api } = require('telegram');
+        const { UpdateConnectionState } = require('telegram/network');
+        // Exported media senders do not use this update callback. Therefore these
+        // state events represent the primary account sender, not the expected
+        // 30-second idle disconnect of a file-download DC.
+        client.addEventHandler(async (stateUpdate) => {
+            if (intentionallyDisconnectedClients.has(client) ||
+                listener.stopped ||
+                listener.client !== client)
+                return;
+            const state = Number(stateUpdate?.state);
+            tgLog(state === UpdateConnectionState.connected ? 'info' : 'warn', account.accountId, 'socket', 'CONNECTION_STATE', {
+                result: state === UpdateConnectionState.connected
+                    ? 'connected'
+                    : state === UpdateConnectionState.broken
+                        ? 'broken'
+                        : 'disconnected',
+            });
+            if (state === UpdateConnectionState.connected) {
+                markPrimaryConnectionRestored(listener, client, 'gramjs_auto_reconnect');
+                return;
+            }
+            scheduleReconnect(listener, state === UpdateConnectionState.broken ? 'transport_broken' : 'transport_disconnected');
+        }, new events_1.Raw({ types: [UpdateConnectionState] }));
+        // Diagnostic ingress probe: register BEFORE the high-level NewMessage
+        // builder so we can distinguish "Telegram did not send the update" from
+        // "the builder/handler stalled or rejected it". This handler is read-only
+        // and intentionally logs no message content or access hash.
+        let lastChannelReceivedLogAt = 0;
+        let lastChannelProcessedLogAt = 0;
+        client.addEventHandler(async (update) => {
+            // A reconnect replaces listener.client, but GramJS can still flush
+            // updates from the old client while it is closing. Ignore those stale
+            // callbacks so one old socket cannot duplicate recovery work.
+            if (listener.stopped || listener.client !== client || !client.connected)
+                return;
+            try {
+                const message = update?.message;
+                let chatId = message ? deriveChatIdFromRawMessage(message) : undefined;
+                if (!chatId && update instanceof Api.UpdateChannelTooLong && update.channelId != null) {
+                    chatId = `-100${String(update.channelId)}`;
+                }
+                const localPts = chatId?.startsWith('-100')
+                    ? DatabaseService_1.default.getInstance()?.getTelegramChannelPts(account.accountId, chatId)
+                    : undefined;
+                if (update instanceof Api.UpdateNewChannelMessage && Date.now() - lastChannelReceivedLogAt >= 30000) {
+                    lastChannelReceivedLogAt = Date.now();
+                    Logger_1.default.log(`[TG:socket] CHANNEL_RECEIVED account=${account.accountId} chatId=${chatId} msgId=${message?.id} pts=${update.pts} localPts=${localPts}`);
+                }
+                tgLog('info', account.accountId, 'socket', `RAW_RECEIVED ${update?.className || update?.constructor?.name || 'unknown'}`, {
+                    msgClass: message?.className || '-',
+                    mediaClass: message?.media?.className || '-',
+                    chatId: chatId || '-',
+                    msgId: message?.id != null ? String(message.id) : '-',
+                    pts: update?.pts,
+                    ptsCount: update?.ptsCount,
+                    localPts,
+                    replyToMsgId: message?.replyTo?.replyToMsgId,
+                    replyToTopId: message?.replyTo?.replyToTopId,
+                    forumTopic: message?.replyTo?.forumTopic === true,
+                });
+            }
+            catch (err) {
+                tgLog('warn', account.accountId, 'socket', `RAW_RECEIVED diagnostic failed: ${err.message}`);
+            }
+        }, new events_1.Raw({
+            types: [
+                Api.UpdateNewMessage,
+                Api.UpdateNewChannelMessage,
+                Api.UpdateShortMessage,
+                Api.UpdateShortChatMessage,
+                Api.UpdateChannelTooLong,
+                Api.UpdatesTooLong,
+            ].filter(Boolean),
+        }));
+        // Listen for new messages (socket — primary realtime source).
+        // The raw handler owns the channel PTS cursor. The high-level NewMessage
+        // builder below remains an idempotent delivery fallback: it must continue
+        // to persist a live message even while a historical PTS recovery is
+        // draining, otherwise a large recovery queue turns every supergroup and
+        // channel into a silent conversation until the queue eventually finishes.
+        client.addEventHandler(async (update) => {
+            if (listener.stopped || listener.client !== client || !client.connected)
+                return;
+            if (update instanceof Api.UpdateChannelTooLong) {
+                if (update.channelId != null) {
+                    requestChannelRecovery(listener, `-100${String(update.channelId)}`, 'UpdateChannelTooLong');
+                }
+                return;
+            }
+            if (!(update instanceof Api.UpdateNewChannelMessage))
+                return;
+            const message = update.message;
+            const chatId = deriveChatIdFromRawMessage(message);
+            if (!message || !chatId) {
+                throw new Error('UpdateNewChannelMessage has no canonical channel identity');
+            }
+            // Do this before PTS validation: a live channel update is often the
+            // first place an old/archived dialog exposes its current access hash.
+            const rawChannelEntity = cacheRawChannelEntity(account.accountId, update, chatId);
+            const db = DatabaseService_1.default.getInstance();
+            if (!db)
+                throw new Error('Database is unavailable for live channel update');
+            const rawMembership = getTelegramMembership(rawChannelEntity);
+            const isVerifiedMember = hasVerifiedTelegramChannelMembership(account.accountId, chatId);
+            // Telegram can deliver channel updates for old joinable/request peers.
+            // Drop them before PTS handling: scheduling a Difference for each of
+            // those peers was flooding the queue and delaying real conversations.
+            if (rawMembership.state !== 'member' && !isVerifiedMember) {
+                tgChannelRealtimeTrace('RAW_DROPPED_NON_MEMBER', account.accountId, {
+                    chatId,
+                    msgId: message?.id != null ? String(message.id) : '-',
+                    membership: rawMembership.state,
+                    rawEntityClass: rawChannelEntity?.className || '-',
+                    rawEntityLeft: rawChannelEntity?.left === true,
+                });
+                return;
+            }
+            db.preserveChannelRecoveryHistoryStart(account.accountId, chatId);
+            const previousPts = db.getTelegramChannelPts(account.accountId, chatId);
+            const nextPts = Number(update.pts || 0);
+            const ptsCount = Math.max(1, Number(update.ptsCount || 1));
+            const hasDurableMessageWithoutCursor = previousPts <= 0 && !!db.queryOne(`SELECT 1 FROM messages
+         WHERE owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'
+         LIMIT 1`, [account.accountId, chatId]);
+            const hasPtsGap = previousPts > 0 && previousPts + ptsCount < nextPts;
+            // A gap means the durable PTS cursor cannot be advanced from this
+            // update; doing so would skip the missing range during recovery.  It
+            // does *not* make the current message unsafe to deliver, though.  In
+            // particular, large channels can keep a recovery job queued for a long
+            // time. Returning here made those chats look offline until that queue
+            // completed because NewMessage is not guaranteed to be emitted for all
+            // UpdateNewChannelMessage variants.
+            const recoveryQueued = hasDurableMessageWithoutCursor || hasPtsGap;
+            const entities = update._entities instanceof Map
+                ? update._entities
+                : new Map();
+            tgChannelRealtimeTrace('RAW_ACCEPTED', account.accountId, {
+                chatId,
+                msgId: message?.id != null ? String(message.id) : '-',
+                messageClass: message?.className || message?.constructor?.name || '-',
+                mediaClass: message?.media?.className || '-',
+                hasResolvedChat: !!message?.chat,
+                rawEntityClass: rawChannelEntity?.className || '-',
+                rawEntityLeft: rawChannelEntity?.left === true,
+                entityCount: entities.size,
+                pts: nextPts,
+                ptsCount,
+                previousPts,
+                hasPtsGap,
+                missingCursorWithHistory: hasDurableMessageWithoutCursor,
+                recoveryQueued,
+            });
+            // Freeze the history lower bound before delivering this high-ID message
+            // so DifferenceTooLong can still recover from before the gap.
+            if (recoveryQueued) {
+                tgChannelRealtimeTrace('RECOVERY_QUEUED_LIVE_CONTINUES', account.accountId, {
+                    chatId,
+                    msgId: message?.id != null ? String(message.id) : '-',
+                    reason: hasPtsGap ? 'pts_gap' : 'missing_channel_pts_with_history',
+                });
+                requestChannelRecovery(listener, chatId, hasPtsGap
+                    ? `pts_gap:${previousPts}->${nextPts}/${ptsCount}`
+                    : 'missing_channel_pts_with_history');
+            }
+            const event = initializeRecoveredMessage(message, client, entities, rawChannelEntity);
+            const result = await handleNewMessage(account.accountId, event, client, 'socket');
+            tgChannelRealtimeTrace('HANDLE_COMPLETE', account.accountId, {
+                chatId,
+                msgId: message?.id != null ? String(message.id) : '-',
+                persistStatus: result.status,
+                recoveryQueued,
+            });
+            if (result.status === 'failed') {
+                throw new Error(`Live channel message ${String(message.id)} failed persistence`);
+            }
+            // Only a contiguous update may move the cursor. Recovery owns the
+            // cursor while a gap/missing legacy cursor is being reconciled.
+            if (nextPts > previousPts && !recoveryQueued) {
+                db.saveTelegramChannelPts(account.accountId, chatId, nextPts);
+                tgChannelRealtimeTrace('PTS_COMMITTED', account.accountId, {
+                    chatId,
+                    msgId: message?.id != null ? String(message.id) : '-',
+                    previousPts,
+                    pts: nextPts,
+                });
+                tgLog('info', account.accountId, 'socket', `CURSOR_COMMITTED ${chatId}`, {
+                    previousPts,
+                    pts: nextPts,
+                    ptsCount,
+                    result: result.status,
+                });
+            }
+            else if (recoveryQueued) {
+                tgChannelRealtimeTrace('PTS_DEFERRED', account.accountId, {
+                    chatId,
+                    msgId: message?.id != null ? String(message.id) : '-',
+                    previousPts,
+                    pts: nextPts,
+                    reason: hasPtsGap ? 'pts_gap' : 'missing_channel_pts_with_history',
+                });
+                tgLog('info', account.accountId, 'socket', `LIVE_DELIVERED_CURSOR_DEFERRED ${chatId}`, {
+                    previousPts,
+                    pts: nextPts,
+                    ptsCount,
+                    result: result.status,
+                    reason: hasPtsGap ? 'pts_gap' : 'missing_channel_pts_with_history',
+                });
+            }
+        }, new events_1.Raw({ types: [Api.UpdateNewChannelMessage, Api.UpdateChannelTooLong] }));
+        client.addEventHandler(async (event) => {
+            if (listener.stopped || listener.client !== client || !client.connected)
+                return;
+            try {
+                const message = event?.message;
+                const builderChatId = deriveChatIdFromRawMessage(message);
+                tgLog('info', account.accountId, 'socket', 'BUILDER_RECEIVED NewMessage', {
+                    msgClass: message?.className || '-',
+                    mediaClass: message?.media?.className || '-',
+                    chatId: builderChatId || '-',
+                    msgId: message?.id != null ? String(message.id) : '-',
+                    replyToMsgId: message?.replyTo?.replyToMsgId,
+                    replyToTopId: message?.replyTo?.replyToTopId,
+                    forumTopic: message?.replyTo?.forumTopic === true,
+                });
+                // Do not gate a live supergroup/channel event on the historical PTS
+                // recovery queue. That queue can legitimately stay pending for a long
+                // time on accounts with thousands of channels. `handleNewMessage` is
+                // idempotent, while the raw handler/difference drain remains the only
+                // writer of the PTS cursor, so processing this fallback cannot advance
+                // the channel cursor. Freeze the separate history boundary for legacy
+                // pending rows before writing the newest message as well.
+                if (builderChatId?.startsWith('-100')) {
+                    DatabaseService_1.default.getInstance()?.preserveChannelRecoveryHistoryStart(account.accountId, builderChatId);
+                }
+                const result = await handleNewMessage(account.accountId, event, client, 'socket');
+                if (builderChatId?.startsWith('-100') && Date.now() - lastChannelProcessedLogAt >= 30000) {
+                    lastChannelProcessedLogAt = Date.now();
+                    Logger_1.default.log(`[TG:socket] CHANNEL_PROCESSED account=${account.accountId} chatId=${builderChatId} msgId=${message?.id} result=${result.status}`);
+                }
+            }
+            catch (err) {
+                tgLog('error', account.accountId, 'socket', `Error handling message: ${err.message}`);
+            }
+        }, new events_1.NewMessage({}));
+        // Listen for edited messages via Raw event (UpdateEditMessage)
+        const rawUpdateHandler = async (update) => {
+            if (listener.stopped || listener.client !== client || !client.connected)
+                return;
+            try {
+                const db = DatabaseService_1.default.getInstance();
+                if (!db)
+                    return;
+                let msgId;
+                let newText;
+                let chatId;
+                if (update instanceof Api.UpdateChannelTooLong) {
+                    if (update.channelId != null) {
+                        requestChannelRecovery(listener, `-100${String(update.channelId)}`, 'difference_UpdateChannelTooLong');
+                    }
+                    return;
+                }
+                if (update instanceof Api.UpdateFolderPeers) {
+                    for (const folderPeer of update.folderPeers || []) {
+                        const folderChatId = getCanonicalChatId(folderPeer.peer);
+                        const folderId = Number(folderPeer.folderId || 0);
+                        if (!folderChatId)
+                            continue;
+                        db.run(`UPDATE contacts SET telegram_folder_id = ?, telegram_archived = ?, is_in_others = ?, telegram_state_updated_at = ?
+               WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, [folderId, folderId === 1 ? 1 : 0, folderId === 1 ? 1 : 0, Date.now(), account.accountId, folderChatId]);
+                    }
+                    EventBroadcaster_1.default.emit('db:unreadChanged', { zaloId: account.accountId, source: 'telegram_folder_update' });
+                    return;
+                }
+                if (update instanceof Api.UpdateNotifySettings && update.peer?.className === 'NotifyPeer') {
+                    const notifyChatId = getCanonicalChatId(update.peer.peer);
+                    const muteUntil = Number(update.notifySettings?.muteUntil || 0);
+                    if (notifyChatId) {
+                        const foreverMuted = muteUntil >= 2147483647;
+                        const muteUntilMs = muteUntil > 0 && !foreverMuted ? muteUntil * 1000 : 0;
+                        db.run(`UPDATE contacts SET is_muted = ?, mute_until = ?, telegram_state_updated_at = ?
+               WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, [foreverMuted ? 1 : 0, muteUntilMs, Date.now(), account.accountId, notifyChatId]);
+                        EventBroadcaster_1.default.emit('db:unreadChanged', { zaloId: account.accountId, source: 'telegram_notify_update' });
+                    }
+                    return;
+                }
+                if (update instanceof Api.UpdateChatDefaultBannedRights) {
+                    const rightsChatId = getCanonicalChatId(update.peer);
+                    if (rightsChatId)
+                        getGroupInfo(account.accountId, rightsChatId).catch(() => { });
+                    return;
+                }
+                if (update instanceof Api.UpdateUserTyping) {
+                    const userId = String(update.userId);
+                    await hydrateTelegramTypingIdentity(account.accountId, client, userId, userId);
+                    EventBroadcaster_1.default.emit('event:typing', {
+                        zaloId: account.accountId,
+                        threadId: userId,
+                        userId,
+                        channel: 'telegram_user',
+                    });
+                    return;
+                }
+                if (update instanceof Api.UpdateChatUserTyping) {
+                    const userId = getCanonicalChatId(update.fromId);
+                    const typingChatId = `-${String(update.chatId)}`;
+                    await hydrateTelegramTypingIdentity(account.accountId, client, userId, typingChatId);
+                    EventBroadcaster_1.default.emit('event:typing', {
+                        zaloId: account.accountId,
+                        threadId: typingChatId,
+                        userId,
+                        channel: 'telegram_user',
+                    });
+                    return;
+                }
+                if (update instanceof Api.UpdateChannelUserTyping) {
+                    const userId = getCanonicalChatId(update.fromId);
+                    const typingChatId = `-100${String(update.channelId)}`;
+                    scheduleTypingChannelRecovery(listener, typingChatId);
+                    await hydrateTelegramTypingIdentity(account.accountId, client, userId, typingChatId);
+                    EventBroadcaster_1.default.emit('event:typing', {
+                        zaloId: account.accountId,
+                        threadId: typingChatId,
+                        userId,
+                        topicRootMessageId: update.topMsgId ? String(update.topMsgId) : undefined,
+                        channel: 'telegram_user',
+                    });
+                    return;
+                }
+                if (update instanceof Api.UpdateMessageReactions) {
+                    const chatId = getCanonicalChatId(update.peer);
+                    const msgId = String(update.msgId || '');
+                    if (!chatId || !msgId)
+                        return;
+                    const reactions = normalizeTelegramReactions(update.reactions, account.accountId);
+                    for (const recent of update.reactions?.recentReactions || []) {
+                        const reactorId = getCanonicalChatId(recent?.peerId);
+                        if (reactorId && !reactorId.startsWith('-')) {
+                            hydrateTelegramIdentity(account.accountId, client, reactorId, chatId).catch(() => { });
+                        }
+                    }
+                    db.run('UPDATE messages SET reactions = ? WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = \'telegram_user\'', [JSON.stringify(reactions), msgId, account.accountId, chatId]);
+                    EventBroadcaster_1.default.emit('event:telegramReaction', {
+                        zaloId: account.accountId,
+                        threadId: chatId,
+                        msgId,
+                        topicRootMessageId: update.topMsgId ? String(update.topMsgId) : undefined,
+                        reactions,
+                    });
+                    return;
+                }
+                // Channel reactions (UpdateChannelMessageReactions)
+                if (update.className === 'UpdateChannelMessageReactions' ||
+                    update.CONSTRUCTOR_ID === 0xc2db42ae) {
+                    const channelId = update.channelId;
+                    const msgId = String(update.topMsgId || update.msgId || '');
+                    if (!channelId || !msgId)
+                        return;
+                    const chatId = `-100${String(channelId)}`;
+                    const reactions = normalizeTelegramReactions(update.reactions, account.accountId);
+                    db.run('UPDATE messages SET reactions = ? WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = \'telegram_user\'', [JSON.stringify(reactions), msgId, account.accountId, chatId]);
+                    EventBroadcaster_1.default.emit('event:telegramReaction', {
+                        zaloId: account.accountId,
+                        threadId: chatId,
+                        msgId,
+                        reactions,
+                    });
+                    return;
+                }
+                if (update instanceof Api.UpdateEditMessage) {
+                    const msg = update.message;
+                    if (!msg)
+                        return;
+                    msgId = String(msg.id);
+                    newText = msg.message || msg.text || '';
+                    // Extract chat ID from peer
+                    const peerId = msg.peerId;
+                    if (peerId)
+                        chatId = getCanonicalChatId(peerId);
+                }
+                else if (update instanceof Api.UpdateEditChannelMessage) {
+                    const msg = update.message;
+                    if (!msg)
+                        return;
+                    msgId = String(msg.id);
+                    newText = msg.message || msg.text || '';
+                    const peerId = msg.peerId;
+                    if (peerId)
+                        chatId = getCanonicalChatId(peerId);
+                }
+                if (msgId && newText !== undefined) {
+                    if (chatId) {
+                        // Build edit_history from current content (giống Facebook handler)
+                        const existingMsg = db.queryOne(`SELECT content, edit_history FROM messages WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [msgId, account.accountId, chatId]);
+                        let editHistory = [];
+                        if (existingMsg?.edit_history) {
+                            try {
+                                editHistory = JSON.parse(existingMsg.edit_history);
+                            }
+                            catch {
+                                editHistory = [];
+                            }
+                        }
+                        const contentChanged = existingMsg?.content && existingMsg.content !== newText;
+                        if (contentChanged) {
+                            editHistory.push({ oldBody: existingMsg.content, editedAt: Date.now(), editCount: editHistory.length + 1 });
+                        }
+                        // Only set is_edited=1 when content ACTUALLY changed (reaction updates don't change content)
+                        db.run(`UPDATE messages SET content = ?, is_edited = ?, edit_history = ? WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [newText, contentChanged ? 1 : 0, JSON.stringify(editHistory), msgId, account.accountId, chatId]);
+                    }
+                    EventBroadcaster_1.default.emit('event:messageEdited', {
+                        zaloId: account.accountId,
+                        msgId,
+                        newText,
+                        threadId: chatId,
+                    });
+                    Logger_1.default.log(`[TelegramUserListener] Message edited: ${msgId}`);
+                }
+                // Handle deleted messages (thu hồi)
+                if (update instanceof Api.UpdateDeleteMessages || update instanceof Api.UpdateDeleteChannelMessages) {
+                    const ids = update.messages || [];
+                    // Channel message IDs are scoped to their channel. Never mark an
+                    // equal ID in another Telegram channel as deleted.
+                    const deletedThreadId = update instanceof Api.UpdateDeleteChannelMessages && update.channelId != null
+                        ? `-100${String(update.channelId)}`
+                        : undefined;
+                    for (const id of ids) {
+                        const msgIdStr = String(id);
+                        // Lưu recalled_content trước khi đánh dấu thu hồi
+                        const scope = deletedThreadId
+                            ? `msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`
+                            : `msg_id = ? AND owner_zalo_id = ? AND channel = 'telegram_user'`;
+                        const scopeParams = deletedThreadId
+                            ? [msgIdStr, account.accountId, deletedThreadId]
+                            : [msgIdStr, account.accountId];
+                        const existingMsg = db.queryOne(`SELECT content, msg_type, recalled_content, recalled_msg_type FROM messages WHERE ${scope}`, scopeParams);
+                        const recalledContent = existingMsg?.recalled_content ?? existingMsg?.content ?? null;
+                        const recalledMsgType = existingMsg?.recalled_msg_type
+                            || (existingMsg?.msg_type !== 'recalled' ? existingMsg?.msg_type : null);
+                        Logger_1.default.log(`[TelegramUserListener] Recall msg ${msgIdStr}: content="${(recalledContent || '').slice(0, 100)}" type=${recalledMsgType || '-'} scope=${scope} deletedThreadId=${deletedThreadId || 'none'}`);
+                        if (deletedThreadId) {
+                            db.run(`UPDATE messages SET msg_type = 'recalled', status = 'recalled', is_recalled = 1,
+                 recalled_content = CASE WHEN recalled_content IS NULL OR recalled_content = '' THEN ? ELSE recalled_content END,
+                 recalled_msg_type = CASE WHEN recalled_msg_type IS NULL OR recalled_msg_type = '' THEN ? ELSE recalled_msg_type END
+                 WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [recalledContent, recalledMsgType, msgIdStr, account.accountId, deletedThreadId]);
+                        }
+                        else {
+                            db.run(`UPDATE messages SET msg_type = 'recalled', status = 'recalled', is_recalled = 1,
+                 recalled_content = CASE WHEN recalled_content IS NULL OR recalled_content = '' THEN ? ELSE recalled_content END,
+                 recalled_msg_type = CASE WHEN recalled_msg_type IS NULL OR recalled_msg_type = '' THEN ? ELSE recalled_msg_type END
+                 WHERE msg_id = ? AND owner_zalo_id = ? AND channel = 'telegram_user'`, [recalledContent, recalledMsgType, msgIdStr, account.accountId]);
+                        }
+                    }
+                    if (ids.length > 0) {
+                        EventBroadcaster_1.default.emit('event:messagesDeleted', {
+                            zaloId: account.accountId,
+                            messageIds: ids.map(String),
+                            threadId: deletedThreadId,
+                        });
+                    }
+                }
+                // ── Read history (inbox = other party read our messages) ─────────────
+                if (update instanceof Api.UpdateReadHistoryInbox) {
+                    try {
+                        const peer = update.peer;
+                        const maxId = String(update.maxId || '');
+                        if (peer && maxId) {
+                            const readChatId = getCanonicalChatId(peer);
+                            // Đánh dấu tin nhắn đã gửi (is_sent=1) là 'read' đến maxId
+                            db.run(`UPDATE messages SET status = 'read'
+                 WHERE owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'
+                   AND is_sent = 1 AND CAST(msg_id AS INTEGER) <= ? AND status != 'read'`, [account.accountId, readChatId, Number(maxId)]);
+                            EventBroadcaster_1.default.emit('event:seen', {
+                                zaloId: account.accountId,
+                                threadId: readChatId,
+                                msgId: maxId,
+                                channel: 'telegram_user',
+                            });
+                            EventBroadcaster_1.default.emit('db:unreadChanged', { zaloId: account.accountId, source: 'telegram_read_inbox' });
+                        }
+                    }
+                    catch (err) {
+                        Logger_1.default.warn(`[TelegramUserListener] ReadHistoryInbox error: ${err.message}`);
+                    }
+                    return;
+                }
+                // ── Read history outbox (we read their messages on another device) ───
+                if (update instanceof Api.UpdateReadHistoryOutbox) {
+                    try {
+                        const peer = update.peer;
+                        if (peer) {
+                            const readChatId = getCanonicalChatId(peer);
+                            // Đánh dấu tin nhắn nhận được (is_sent=0) là 'read' và clear unread_count
+                            db.run(`UPDATE messages SET status = 'read'
+                 WHERE owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'
+                   AND is_sent = 0 AND status != 'read'`, [account.accountId, readChatId]);
+                            db.run(`UPDATE contacts SET unread_count = 0
+                 WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, [account.accountId, readChatId]);
+                            EventBroadcaster_1.default.emit('event:seen', {
+                                zaloId: account.accountId,
+                                threadId: readChatId,
+                                msgId: String(update.maxId || ''),
+                                channel: 'telegram_user',
+                            });
+                            EventBroadcaster_1.default.emit('db:unreadChanged', { zaloId: account.accountId, source: 'telegram_read_outbox' });
+                        }
+                    }
+                    catch (err) {
+                        Logger_1.default.warn(`[TelegramUserListener] ReadHistoryOutbox error: ${err.message}`);
+                    }
+                    return;
+                }
+                // ── Pinned messages ──────────────────────────────────────────────────
+                if (update instanceof Api.UpdatePinnedMessages) {
+                    try {
+                        const peer = update.peer;
+                        if (peer) {
+                            const pinnedChatId = getCanonicalChatId(peer);
+                            syncPinnedMessages(account.accountId, pinnedChatId).catch((err) => {
+                                Logger_1.default.warn(`[TelegramUserListener] Pin sync failed for ${pinnedChatId}: ${err.message}`);
+                            });
+                        }
+                    }
+                    catch (err) {
+                        Logger_1.default.warn(`[TelegramUserListener] PinnedMessages update failed: ${err.message}`);
+                    }
+                    return;
+                }
+                if (update instanceof Api.UpdatePinnedChannelMessages) {
+                    try {
+                        if (update.channelId != null) {
+                            const pinnedChatId = `-100${String(update.channelId)}`;
+                            syncPinnedMessages(account.accountId, pinnedChatId).catch((err) => {
+                                Logger_1.default.warn(`[TelegramUserListener] Channel pin sync failed for ${pinnedChatId}: ${err.message}`);
+                            });
+                        }
+                    }
+                    catch (err) {
+                        Logger_1.default.warn(`[TelegramUserListener] PinnedChannelMessages update failed: ${err.message}`);
+                    }
+                    return;
+                }
+                // ── User status (online/offline/presence) ────────────────────────────
+                if (update instanceof Api.UpdateUserStatus) {
+                    hydrateTelegramIdentity(account.accountId, client, String(update.userId)).catch(() => { });
+                    const statusClass = update.status?.className || 'unknown';
+                    const presenceStatus = statusClass === 'UserStatusOnline' ? 'online'
+                        : statusClass === 'UserStatusOffline' ? 'offline'
+                            : statusClass === 'UserStatusRecently' ? 'recently'
+                                : statusClass === 'UserStatusLastWeek' ? 'last_week'
+                                    : statusClass === 'UserStatusLastMonth' ? 'last_month'
+                                        : 'unknown';
+                    EventBroadcaster_1.default.emit('event:userPresence', {
+                        zaloId: account.accountId,
+                        userId: String(update.userId),
+                        status: presenceStatus,
+                        wasOnline: update.status?.wasOnline ? Number(update.status.wasOnline) : undefined,
+                        expires: update.status?.expires ? Number(update.status.expires) : undefined,
+                        channel: 'telegram_user',
+                    });
+                    return;
+                }
+            }
+            catch (err) {
+                // `otherUpdates` contains side-effect updates (typing, read state,
+                // reactions, edits...), not the message stream itself. One malformed
+                // local DB update must not abort GetDifference and force a broad,
+                // rate-limited messages.GetHistory replay on every reconnect.
+                const updateType = String(update?.className || update?.constructor?.name || 'unknown');
+                Logger_1.default.warn(`[TelegramUserListener] Raw event ${updateType} error: ${err.message}`);
+                return;
+            }
+        };
+        rawUpdateHandlers.set(account.accountId, rawUpdateHandler);
+        client.addEventHandler(rawUpdateHandler, new events_1.Raw({
+            types: [
+                Api.UpdateEditMessage,
+                Api.UpdateEditChannelMessage,
+                Api.UpdateDeleteMessages,
+                Api.UpdateDeleteChannelMessages,
+                Api.UpdateUserTyping,
+                Api.UpdateChatUserTyping,
+                Api.UpdateChannelUserTyping,
+                Api.UpdateMessageReactions,
+                Api.UpdateChannelTooLong,
+                // Phase C (P0.4): Add UpdateNewMessage/UpdateNewChannelMessage to raw
+                // handler to catch MessageService that GramJS NewMessage builder filters out.
+                // Normal messages may be processed twice (here + NewMessage event) but
+                // idempotent persistence prevents duplicate side effects.
+                Api.UpdateNewMessage,
+                Api.UpdateNewChannelMessage,
+                Api.UpdateReadHistoryInbox,
+                Api.UpdateReadHistoryOutbox,
+                Api.UpdatePinnedMessages,
+                Api.UpdatePinnedChannelMessages,
+                Api.UpdateUserStatus,
+                Api.UpdateFolderPeers,
+                Api.UpdateNotifySettings,
+                Api.UpdateChatDefaultBannedRights,
+                // Channel reactions - handled via className/CONSTRUCTOR_ID check in handler
+                Api.UpdateChannelMessageReactions,
+            ].filter(Boolean),
+        }));
+        // Phase C (P0.4): Separate raw handler for new message updates to catch
+        // MessageService that the NewMessage high-level event builder skips.
+        // Normal messages are de-duplicated by idempotent persistence.
+        client.addEventHandler(async (update) => {
+            if (listener.stopped || listener.client !== client || !client.connected)
+                return;
+            try {
+                const msg = update?.message;
+                if (!msg)
+                    return;
+                // Only handle MessageService here — normal messages go through NewMessage event
+                if (msg.className !== 'MessageService')
+                    return;
+                // Channel service messages are handled by the authoritative raw
+                // channel ingress above. Keep this hook for private/basic-group
+                // MessageService updates, which NewMessage filters out.
+                if (update instanceof Api.UpdateNewChannelMessage)
+                    return;
+                const result = await handleServiceMessage(account.accountId, msg, client);
+                if (result.status === 'failed') {
+                    throw new Error(`Raw service message ${String(msg.id)} failed persistence`);
+                }
+            }
+            catch (err) {
+                tgLog('warn', account.accountId, 'socket', `Raw MessageService error: ${err.message}`);
+            }
+        }, new events_1.Raw({ types: [Api.UpdateNewMessage, Api.UpdateNewChannelMessage] }));
+        Logger_1.default.log(`[TelegramUserListener] Connected for ${account.accountId}`);
+        startHealthCheck(listener);
+        startChannelPoller(listener);
+        // Recover MTProto updates before recording the next global cursor. This
+        // remains background work so a slow history backfill never blocks UI login.
+        synchronizeTelegramAccount(account.accountId, client, {
+            includeHistory: true,
+            recoverRecentChannels: true,
+        }).then(result => {
+            EventBroadcaster_1.default.emit('event:telegramSync', result.success
+                ? { zaloId: account.accountId, status: 'completed', inserted: result.inserted, pending: !result.historyComplete }
+                : { zaloId: account.accountId, status: 'failed', error: 'Không thể hoàn tất đồng bộ tin nhắn Telegram' });
+        }).catch(err => {
+            Logger_1.default.warn(`[TelegramUserListener] Telegram update synchronization failed: ${err.message}`);
+            EventBroadcaster_1.default.emit('event:telegramSync', {
+                zaloId: account.accountId,
+                status: 'failed',
+                error: 'Không thể hoàn tất đồng bộ tin nhắn Telegram',
+            });
+        });
+        // Establish membership separately from the bounded history sync. This is
+        // required before a socket update from a minimally-described channel can
+        // be trusted, and cleans old unjoined rows out of the normal inbox.
+        setTimeout(() => {
+            if (listener.stopped || listener.client !== client || !client.connected)
+                return;
+            reconcileTelegramDialogMembership(account.accountId, client).catch(() => { });
+        }, 1000);
+        // Check isForum for unchecked groups (background, non-blocking)
+        checkForumForNewGroups(account.accountId).catch(err => {
+            Logger_1.default.warn(`[TelegramUserListener] checkForumForNewGroups failed: ${err.message}`);
+        });
+        // Broadcast connection status
+        EventBroadcaster_1.default.emit('event:connected', {
+            zaloId: account.accountId,
+            accountInfo: { channel: 'telegram_user' },
+        });
+    }
+    catch (err) {
+        Logger_1.default.error(`[TelegramUserListener] Connection failed for ${account.accountId}: ${err.message}`);
+        scheduleReconnect(listener, 'connect', err);
+        throw err;
+    }
+}
+/** Resolve the actor of a Telegram service message before persisting it. Service
+ * actions carry only peer IDs, and a newly joined person is usually not in the
+ * group-member cache yet. Keeping the member ID with the system message lets
+ * the renderer display their name and open the same profile popup as a mention. */
+async function resolveTelegramServiceMember(accountId, chatId, userId, db, client, entityHint) {
+    if (!userId)
+        return null;
+    // MessageActionChatAddUser.users is normally a vector of bare user IDs;
+    // only a real Telegram entity is safe to pass through as a hydration hint.
+    let entity = entityHint?.className ? entityHint : undefined;
+    if (!entity && client) {
+        try {
+            entity = await hydrateTelegramIdentity(accountId, client, userId, chatId);
+        }
+        catch {
+            // A deleted/private account can be unavailable to getEntity. Preserve its
+            // ID so the message is still attributable and clickable in the UI.
+        }
+    }
+    else if (entity && client) {
+        try {
+            await hydrateTelegramIdentity(accountId, client, userId, chatId, entity);
+        }
+        catch { }
+    }
+    const cached = db.queryOne(`SELECT display_name, avatar FROM page_group_member
+     WHERE owner_zalo_id = ? AND group_id = ? AND member_id = ?`, [accountId, chatId, userId]);
+    const peer = db.getTelegramPeer(accountId, userId);
+    const entityName = entity
+        ? ([entity.firstName, entity.lastName].filter(Boolean).join(' ') || entity.title || entity.username || '')
+        : '';
+    const displayName = entityName || cached?.display_name || peer?.display_name || peer?.username || userId;
+    return { id: userId, dName: displayName, avatar: cached?.avatar || '' };
+}
+async function handleServiceMessage(accountId, message, client) {
+    const action = message.action;
+    if (!action)
+        return { status: 'ignored' };
+    const db = DatabaseService_1.default.getInstance();
+    if (!db)
+        return { status: 'failed' };
+    const serviceMsgId = String(message.id);
+    const peerId = message.peerId;
+    const serviceChatId = peerId ? getCanonicalChatId(peerId) : '';
+    const serviceTimestamp = (message.date || Math.floor(Date.now() / 1000)) * 1000;
+    const className = action.className || '';
+    // Membership check: skip service messages from unjoined channels
+    if (serviceChatId && client) {
+        try {
+            const chat = await message.getChat();
+            if (chat && getTelegramPeerType(chat) !== 'user') {
+                const membership = getTelegramMembership(chat);
+                if (membership.state !== 'member') {
+                    return { status: 'ignored', chatId: serviceChatId, messageId: serviceMsgId };
+                }
+            }
+        }
+        catch { }
+    }
+    // Check identity before emitting any lifecycle side effect. Difference and
+    // socket may replay the same MessageService.
+    if (serviceChatId) {
+        const persistedService = db.queryOne(`SELECT msg_id FROM messages WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [serviceMsgId, accountId, serviceChatId]);
+        if (persistedService) {
+            return { status: 'duplicate', chatId: serviceChatId, messageId: serviceMsgId };
+        }
+    }
+    let systemText = '';
+    let groupEventType = '';
+    let systemMembers = [];
+    if (className === 'MessageActionChatAddUser') {
+        const addedUsers = action.users || [];
+        if (addedUsers.length > 0) {
+            systemMembers = (await Promise.all(addedUsers.map((user) => {
+                const userId = String(user?.id || user?.userId || user?.valueOf?.() || '');
+                return resolveTelegramServiceMember(accountId, serviceChatId, userId, db, client, user);
+            }))).filter((member) => !!member);
+            const names = systemMembers.map(member => member.dName).filter(Boolean);
+            systemText = names.length > 0
+                ? `${names.join(', ')} đã được thêm vào nhóm`
+                : 'Thành viên đã được thêm vào nhóm';
+        }
+        else {
+            systemText = 'Thành viên mới tham gia nhóm';
+        }
+        groupEventType = 'member_join';
+    }
+    else if (className === 'MessageActionChatJoinedByLink') {
+        // The action itself contains no user. Telegram identifies the joiner as
+        // MessageService.fromId/senderId, so hydrate that peer rather than relying
+        // on the older group-member cache.
+        const senderId = getCanonicalChatId(message?.fromId)
+            || String(message?.senderId?.valueOf?.() || '');
+        let senderEntity;
+        try {
+            senderEntity = await message.getSender?.();
+        }
+        catch { }
+        const sender = await resolveTelegramServiceMember(accountId, serviceChatId, senderId, db, client, senderEntity);
+        if (sender)
+            systemMembers = [sender];
+        systemText = sender?.dName
+            ? `${sender.dName} tham gia nhóm qua link mời`
+            : 'Thành viên tham gia qua link mời';
+        groupEventType = 'member_join';
+    }
+    else if (className === 'MessageActionChatDeleteUser') {
+        const deletedUserId = String(action.userId?.valueOf?.() || action.user_id?.valueOf?.() || '');
+        let deletedUserName = '';
+        if (deletedUserId) {
+            // Try to resolve from group members cache or peer registry
+            const cached = db?.queryOne(`SELECT display_name FROM page_group_member WHERE owner_zalo_id = ? AND group_id = ? AND member_id = ?`, [accountId, serviceChatId, deletedUserId]);
+            deletedUserName = cached?.display_name || '';
+            if (!deletedUserName) {
+                const peer = db?.queryOne(`SELECT display_name FROM telegram_peers WHERE owner_zalo_id = ? AND peer_id = ?`, [accountId, deletedUserId]);
+                deletedUserName = peer?.display_name || '';
+            }
+        }
+        // Check if self-leave or kicked by admin
+        const isSelfLeave = deletedUserId === String(message?.senderId?.valueOf?.() || '');
+        systemText = deletedUserName
+            ? (isSelfLeave ? `${deletedUserName} đã rời khỏi nhóm` : `${deletedUserName} đã bị xoá khỏi nhóm`)
+            : (isSelfLeave ? 'Thành viên đã rời khỏi nhóm' : 'Thành viên đã bị xoá khỏi nhóm');
+        groupEventType = 'member_leave';
+    }
+    else if (className === 'MessageActionChatEditTitle') {
+        systemText = `Tên nhóm đã đổi thành "${action.title || ''}"`;
+        groupEventType = 'title_change';
+        if (serviceChatId) {
+            EventBroadcaster_1.default.emit('event:groupInfoUpdate', {
+                zaloId: accountId,
+                groupId: serviceChatId,
+                name: action.title || '',
+            });
+        }
+    }
+    else if (className === 'MessageActionChatEditPhoto') {
+        systemText = 'Ảnh nhóm đã được thay đổi';
+        groupEventType = 'photo_change';
+    }
+    else if (className === 'MessageActionPinMessage') {
+        systemText = 'Tin nhắn đã được ghim';
+        EventBroadcaster_1.default.emit('event:pinsUpdated', {
+            zaloId: accountId,
+            threadId: serviceChatId,
+        });
+        // ── Phase C: Forum topic lifecycle (P0.5 fix — use real schema names) ──
+        // Telegram schema uses MessageActionTopicCreate and MessageActionTopicEdit.
+        // MessageActionTopicEdit carries optional flags: title, closed, hidden.
+    }
+    else if (className === 'MessageActionTopicCreate') {
+        const topicTitle = action.title || 'chủ đề mới';
+        systemText = `Đã tạo chủ đề "${topicTitle}"`;
+        EventBroadcaster_1.default.emit('event:forumTopicsChanged', {
+            zaloId: accountId,
+            threadId: serviceChatId,
+        });
+    }
+    else if (className === 'MessageActionTopicEdit') {
+        // MessageActionTopicEdit can carry title, closed, hidden changes
+        const topicTitle = action.title || '';
+        const closed = action.closed;
+        const hidden = action.hidden;
+        if (topicTitle) {
+            systemText = `Chủ đề đã đổi tên thành "${topicTitle}"`;
+        }
+        else if (closed === true) {
+            systemText = 'Chủ đề đã được đóng';
+        }
+        else if (closed === false) {
+            systemText = 'Chủ đề đã được mở lại';
+        }
+        else if (hidden === true) {
+            systemText = 'Chủ đề General đã được ẩn';
+        }
+        else if (hidden === false) {
+            systemText = 'Chủ đề General đã được hiện lại';
+        }
+        else {
+            systemText = 'Chủ đề đã được chỉnh sửa';
+        }
+        EventBroadcaster_1.default.emit('event:forumTopicsChanged', {
+            zaloId: accountId,
+            threadId: serviceChatId,
+        });
+    }
+    else {
+        Logger_1.default.log(`[TelegramUserListener] Service message: ${className} in ${serviceChatId}`);
+    }
+    // Save service message to DB (idempotent — P1.5)
+    if (serviceChatId && systemText) {
+        try {
+            // Check if already exists to avoid duplicate side effects
+            const existing = db.queryOne(`SELECT msg_id FROM messages WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [serviceMsgId, accountId, serviceChatId]);
+            if (!existing) {
+                db.run(`
+          INSERT INTO messages
+            (msg_id, owner_zalo_id, thread_id, thread_type, sender_id, content, msg_type, timestamp, is_sent, status, channel, attachments, topic_id)
+          VALUES (?, ?, ?, 1, 'system', ?, 'system', ?, 0, 'received', 'telegram_user', ?, ?)
+        `, [serviceMsgId, accountId, serviceChatId, systemText, serviceTimestamp, JSON.stringify(systemMembers), getForumTopicId(message)]);
+                // Emit group event only for new service messages
+                if (groupEventType && (groupEventType === 'member_join' || groupEventType === 'member_leave')) {
+                    EventBroadcaster_1.default.emit('event:groupEvent', {
+                        zaloId: accountId,
+                        groupId: serviceChatId,
+                        eventType: groupEventType,
+                        data: { action: className, updateMembers: systemMembers },
+                        systemText,
+                        msgId: serviceMsgId,
+                        timestamp: serviceTimestamp,
+                    });
+                }
+                return { status: 'inserted', chatId: serviceChatId, messageId: serviceMsgId };
+            }
+            return { status: 'duplicate', chatId: serviceChatId, messageId: serviceMsgId };
+        }
+        catch (err) {
+            tgLog('warn', accountId, 'socket', `Service message persist error: ${err.message}`, { msgId: serviceMsgId });
+            return { status: 'failed', chatId: serviceChatId, messageId: serviceMsgId };
+        }
+    }
+    return systemText
+        ? { status: 'failed', messageId: serviceMsgId }
+        : { status: 'ignored', chatId: serviceChatId, messageId: serviceMsgId };
+}
+/** Main message ingress — handles normal messages from all sources (socket,
+ *  difference, history). Uses peerId-first identity (P1.1) and idempotent
+ *  persistence (P1.5). Only emits UI events on actual insert. */
+async function handleNewMessage(accountId, event, client, source = 'socket') {
+    const message = event.message;
+    if (!message)
+        return { status: 'ignored' };
+    // ── Service messages (join/leave/title/photo/pin) ────────────────────
+    // GramJS delivers these as NewMessageEvent where message is a MessageService.
+    // Handle them separately from normal messages.
+    if (message.className === 'MessageService') {
+        const result = await handleServiceMessage(accountId, message, client);
+        const serviceChatId = result.chatId || deriveChatIdFromRawMessage(message) || '';
+        if (serviceChatId.startsWith('-100')) {
+            tgChannelRealtimeTrace('SERVICE_MESSAGE_HANDLED', accountId, {
+                source,
+                chatId: serviceChatId,
+                msgId: String(message.id || '-'),
+                action: message.action?.className || '-',
+                persistStatus: result.status,
+            });
+        }
+        return result;
+    }
+    const messageId = String(message.id);
+    if (!messageId)
+        return { status: 'ignored' };
+    // ── Phase B: peerId-first identity (P1.1 fix) ────────────────────────
+    // Derive identity from peerId BEFORE trying getChat(). If getChat() fails
+    // (e.g. cold entity cache after restart), we still persist the message.
+    const rawIdentity = deriveMessageIdentity(message);
+    // GramJS getChat() may issue channels.GetChannels even when _chat exists
+    // (it checks whether the entity HAS a `min` field). Do not put that RPC,
+    // its retries, or FLOOD_WAIT in front of persistence of a socket message.
+    const suppliedChat = event.__deplaoResolvedChat || null;
+    let chat = suppliedChat || message.chat || null;
+    if (!chat && source !== 'socket') {
+        try {
+            chat = await message.getChat();
+        }
+        catch { }
+    }
+    // Use resolved chat entity for metadata, but rawIdentity.chatId is authoritative
+    const chatId = rawIdentity.chatId;
+    if (!chatId) {
+        tgLog('warn', accountId, source, `No chatId derivable for msg ${messageId}`, { peerId: String(message.peerId?.userId ?? message.peerId?.channelId ?? '') });
+        return { status: 'failed', messageId };
+    }
+    // ── Membership check: skip messages from unjoined groups/channels ────
+    // This prevents unjoined channels from appearing in the inbox.
+    if (rawIdentity.peerKind !== 'user' && !message.out) {
+        let isMember = true; // default: allow if we can't determine
+        let membershipState = 'unknown';
+        let membershipSource = 'db_cache';
+        let cachedMembershipState = '';
+        if (chat) {
+            const membership = getTelegramMembership(chat);
+            isMember = membership.state === 'member';
+            membershipState = membership.state;
+            membershipSource = suppliedChat ? 'raw_update_entity' : 'message_chat';
+            // A Channel entity embedded in a socket update is often minimal and
+            // may carry a stale `left` flag. The dialog snapshot is our durable
+            // membership authority: it was written from messages.GetDialogs, not
+            // inferred from a message. Let a known member state override only that
+            // stale negative entity state; it can never admit a known joinable peer.
+            if (!isMember) {
+                const dbContact = DatabaseService_1.default.getInstance()?.queryOne(`SELECT telegram_membership_state, telegram_state_updated_at FROM contacts
+           WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, [accountId, chatId]);
+                cachedMembershipState = String(dbContact?.telegram_membership_state || '');
+                const hasVerifiedDialogState = Number(dbContact?.telegram_state_updated_at || 0) > 0;
+                if (cachedMembershipState === 'member' && hasVerifiedDialogState) {
+                    isMember = true;
+                    membershipState = 'member';
+                    membershipSource = `dialog_cache_override:${membershipSource}`;
+                }
+            }
+        }
+        else {
+            // Fallback: check DB membership state
+            const dbInst = DatabaseService_1.default.getInstance();
+            const dbContact = dbInst?.queryOne(`SELECT telegram_membership_state FROM contacts WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, [accountId, chatId]);
+            if (dbContact && dbContact.telegram_membership_state && dbContact.telegram_membership_state !== 'member') {
+                isMember = false;
+            }
+            membershipState = String(dbContact?.telegram_membership_state || 'unknown');
+        }
+        if (!isMember) {
+            // Expected for channels/groups the account no longer belongs to. A
+            // history backfill can contain thousands of them, so keep that path
+            // quiet; live/difference records remain visible for diagnostics.
+            if (chatId.startsWith('-100') && (source === 'socket' || source === 'channel_difference')) {
+                tgChannelRealtimeTrace('MEMBERSHIP_GATE_IGNORED', accountId, {
+                    chatId,
+                    msgId: messageId,
+                    source,
+                    membership: membershipState,
+                    membershipSource,
+                    cachedMembership: cachedMembershipState || '-',
+                    peerKind: rawIdentity.peerKind,
+                });
+            }
+            return { status: 'ignored', chatId, messageId };
+        }
+        if (chatId.startsWith('-100')) {
+            // Heal only the membership cache when the authoritative raw Channel
+            // entity says this account is a member. Do not change is_in_others here:
+            // that field also represents the user's archive/folder choice.
+            if (source === 'socket' && membershipSource === 'raw_update_entity') {
+                try {
+                    DatabaseService_1.default.getInstance()?.run(`UPDATE contacts
+             SET telegram_membership_state = 'member', telegram_join_action = 'none', telegram_state_updated_at = ?
+             WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, [Date.now(), accountId, chatId]);
+                }
+                catch {
+                    // The live message must remain deliverable even if cache healing fails.
+                }
+            }
+            tgChannelRealtimeTrace('MEMBERSHIP_ACCEPTED', accountId, {
+                chatId,
+                msgId: messageId,
+                source,
+                membership: membershipState,
+                membershipSource,
+                peerKind: rawIdentity.peerKind,
+            });
+        }
+    }
+    const threadType = rawIdentity.threadType;
+    const topicId = rawIdentity.topicId;
+    // Cache entity if resolved (for access_hash and metadata)
+    if (chat) {
+        cacheTelegramPeer(accountId, chatId, chat);
+    }
+    const senderId = String(message.senderId?.valueOf() || '');
+    const isSelf = message.out || false;
+    const timestamp = (message.date || Math.floor(Date.now() / 1000)) * 1000;
+    // Get sender name — best-effort, not blocking identity
+    let senderName = '';
+    try {
+        let sender = message.sender;
+        if (!sender && source !== 'socket')
+            sender = await message.getSender();
+        if (!sender && senderId && client && source !== 'socket') {
+            sender = await hydrateTelegramIdentity(accountId, client, senderId, threadType === 1 ? chatId : undefined);
+        }
+        if (sender) {
+            if ('firstName' in sender) {
+                senderName = [sender.firstName, sender.lastName].filter(Boolean).join(' ');
+            }
+            if (!senderName && 'title' in sender) {
+                senderName = sender.title || '';
+            }
+            if (!senderName && 'username' in sender) {
+                senderName = '@' + sender.username;
+            }
+            if (senderId && client && source !== 'socket')
+                await hydrateTelegramIdentity(accountId, client, senderId, threadType === 1 ? chatId : undefined, sender);
+        }
+    }
+    catch (err) {
+        tgLog('warn', accountId, source, `Sender hydration failed for msg ${messageId}`, {
+            chatId, senderId, error: err?.message,
+        });
+    }
+    if (!senderName && senderId) {
+        senderName = DatabaseService_1.default.getInstance()?.getTelegramPeer(accountId, senderId)?.display_name || '';
+    }
+    // ── Determine content + msgType + attachments ──────────────────────────
+    const peerType = chat ? getTelegramPeerType(chat) : DatabaseService_1.default.getInstance()?.getTelegramPeer(accountId, chatId)?.peer_type;
+    const { content, msgType, attachments } = normalizeTelegramMessageMedia(message, peerType);
+    const reactions = normalizeTelegramReactions(message.reactions, accountId);
+    // ── Reply detection ────────────────────────────────────────────────────
+    let replyToId;
+    let quoteData;
+    try {
+        replyToId = getTelegramReplyToMessageId(message);
+        if (replyToId) {
+            const db = DatabaseService_1.default.getInstance();
+            if (db) {
+                const orig = db.queryOne(`SELECT content, msg_type, sender_id, attachments FROM messages WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [replyToId, accountId, chatId]);
+                if (orig) {
+                    // Resolve sender name from group members cache or peer registry
+                    let senderName = '';
+                    if (orig.sender_id) {
+                        const member = db.queryOne(`SELECT display_name FROM page_group_member WHERE owner_zalo_id = ? AND group_id = ? AND member_id = ?`, [accountId, chatId, orig.sender_id]);
+                        senderName = member?.display_name || '';
+                        if (!senderName) {
+                            const peer = db.queryOne(`SELECT display_name FROM telegram_peers WHERE owner_zalo_id = ? AND peer_id = ?`, [accountId, orig.sender_id]);
+                            senderName = peer?.display_name || '';
+                        }
+                    }
+                    quoteData = buildTelegramQuoteData({
+                        msgId: replyToId,
+                        content: orig.content,
+                        senderId: orig.sender_id,
+                        senderName,
+                        msgType: orig.msg_type,
+                        attachments: orig.attachments,
+                    });
+                }
+            }
+        }
+    }
+    catch { }
+    // ── Phase B: Idempotent persistence (P1.5 fix) ────────────────────────
+    const db = DatabaseService_1.default.getInstance();
+    if (!db)
+        return { status: 'failed', chatId, messageId };
+    const displayContent = content || (() => {
+        // Chỉ hiện placeholder cho audio (có ý nghĩa), còn lại empty nếu không có caption
+        if (msgType === 'audio')
+            return '🎵 Audio';
+        if (msgType !== 'text')
+            return '';
+        return '';
+    })();
+    const inlineButtons = parseInlineButtons(message);
+    const result = persistTelegramMessage(db, {
+        msgId: messageId, accountId, chatId, threadType,
+        senderId, content: displayContent, msgType, timestamp,
+        isSelf, attachments, replyToId, quoteData, topicId, reactions,
+        inlineButtons,
+    });
+    if (chatId.startsWith('-100')) {
+        tgChannelRealtimeTrace('DB_PERSISTED', accountId, {
+            source,
+            chatId,
+            msgId: messageId,
+            persistStatus: result.status,
+            peerKind: rawIdentity.peerKind,
+            msgType,
+            isSelf,
+            topicId: topicId || '-',
+        });
+    }
+    tgLog('info', accountId, source, `msg ${messageId}`, {
+        chatId,
+        topicId: topicId || '-',
+        result: result.status,
+        msgType,
+        msgClass: message?.className || '-',
+        mediaClass: message?.media?.className || '-',
+        replyToMsgId: message?.replyTo?.replyToMsgId,
+        replyToTopId: message?.replyTo?.replyToTopId,
+        forumTopic: message?.replyTo?.forumTopic === true,
+    });
+    // ── Side effects ONLY on actual insert ─────────────────────────────────
+    // Difference/reconnect recovery preserves real unread state, but must not
+    // replay one desktop toast or sound for every message missed while offline.
+    const suppressNotification = source !== 'socket';
+    if (result.status === 'inserted') {
+        // Update contacts — only when a NEW message was inserted
+        const isGroup = rawIdentity.peerKind !== 'user';
+        const chatTitle = (chat && 'title' in chat ? chat.title : '') || senderName || chatId;
+        // Group chat: prepend sender name to last_message preview
+        const preview = (0, TelegramMessagePreview_1.getTelegramMessagePreview)(msgType, content);
+        const lastMessagePreview = (isGroup && !isSelf && senderName)
+            ? `${senderName}: ${preview}`
+            : preview;
+        // Check membership state for "Others" folder auto-placement
+        // For groups/channels: if not a member → put in Others
+        let shouldBeInOthers = false;
+        if (isGroup && !isSelf) {
+            const existingContact = db.queryOne(`SELECT is_in_others, telegram_membership_state FROM contacts WHERE owner_zalo_id = ? AND contact_id = ?`, [accountId, chatId]);
+            if (existingContact) {
+                // Keep existing Others state; persistTelegramDialogState will update it during sync
+                shouldBeInOthers = existingContact.is_in_others === 1;
+            }
+            else if (chat) {
+                // New contact: check membership from entity
+                const membership = getTelegramMembership(chat);
+                shouldBeInOthers = membership.state !== 'member';
+            }
+        }
+        // Detect if peer is a bot (for DM conversations with bots)
+        const peerIsBot = chat?.className === 'User' && chat?.bot ? 1 : null;
+        db.run(`
+      INSERT INTO contacts (owner_zalo_id, contact_id, display_name, avatar_url, is_friend, contact_type, unread_count, last_message, last_message_time, channel, is_in_others, is_cov_bot)
+      VALUES (?, ?, ?, '', 0, ?, ?, ?, ?, 'telegram_user', ?, ?)
+      ON CONFLICT(owner_zalo_id, contact_id) DO UPDATE SET
+        display_name = CASE WHEN excluded.display_name != '' AND contacts.display_name = '' THEN excluded.display_name ELSE contacts.display_name END,
+        last_message = CASE WHEN excluded.last_message_time >= COALESCE(contacts.last_message_time, 0) THEN excluded.last_message ELSE contacts.last_message END,
+        last_message_time = CASE WHEN excluded.last_message_time >= COALESCE(contacts.last_message_time, 0) THEN excluded.last_message_time ELSE contacts.last_message_time END,
+        unread_count = CASE WHEN ? = 0 THEN contacts.unread_count ELSE contacts.unread_count + 1 END,
+        channel = 'telegram_user',
+        is_cov_bot = CASE WHEN excluded.is_cov_bot = 1 THEN 1 ELSE contacts.is_cov_bot END
+    `, [
+            accountId, chatId, chatTitle,
+            isGroup ? 'group' : 'user',
+            isSelf ? 0 : 1, lastMessagePreview, timestamp,
+            shouldBeInOthers ? 1 : 0, peerIsBot,
+            isSelf ? 0 : 1,
+        ]);
+        // If this is a new group/channel with no real name (just ID), resolve info async
+        if (isGroup && chatTitle === chatId && client) {
+            resolveNewGroupInfo(accountId, client, chatId).catch(() => { });
+        }
+        // Fetch avatar cho contact mới (background, non-blocking)
+        if (client && !isSelf && chat) {
+            fetchNewContactAvatar(accountId, client, chatId, chat).catch(() => { });
+        }
+        // Emit is synchronous: WorkflowEngine's before-send hook receives this
+        // exact payload before the renderer does. Trace both sides so a copied log
+        // establishes whether a missing automation is ingress, DB, or workflow.
+        if (chatId.startsWith('-100')) {
+            tgChannelRealtimeTrace('EVENT_MESSAGE_EMIT_START', accountId, {
+                source,
+                chatId,
+                msgId: messageId,
+                peerKind: rawIdentity.peerKind,
+                msgType,
+                isChannel: rawIdentity.peerKind === 'channel',
+            });
+        }
+        // Broadcast to UI/workflow — only for new messages
+        EventBroadcaster_1.default.emit('event:message', {
+            zaloId: accountId,
+            channel: 'telegram_user',
+            message: {
+                channel: 'telegram_user',
+                type: threadType,
+                threadId: chatId,
+                isSelf,
+                _silentNotification: suppressNotification,
+                data: {
+                    uidFrom: senderId,
+                    idTo: chatId,
+                    msgId: messageId,
+                    content,
+                    preview,
+                    msgType,
+                    channel: 'telegram_user',
+                    isChannel: rawIdentity.peerKind === 'channel',
+                    ts: String(timestamp),
+                    dName: senderName,
+                    topicId,
+                    replyToId,
+                    quoteData,
+                    attachments,
+                    telegramPost: attachments.find((attachment) => attachment.type === 'telegram_post') || undefined,
+                },
+            },
+        });
+        if (chatId.startsWith('-100')) {
+            tgChannelRealtimeTrace('EVENT_MESSAGE_EMIT_DONE', accountId, {
+                source,
+                chatId,
+                msgId: messageId,
+            });
+        }
+        tgLog('info', accountId, source, `UI_EMITTED msg ${messageId}`, {
+            chatId,
+            topicId: topicId || '-',
+            msgType,
+        });
+    }
+    else if (result.status === 'updated') {
+        // Attachments were merged into existing message — emit event so UI picks it up
+        if (chatId.startsWith('-100')) {
+            tgChannelRealtimeTrace('EVENT_MESSAGE_EMIT_START', accountId, {
+                source,
+                chatId,
+                msgId: messageId,
+                persistStatus: 'updated',
+                peerKind: rawIdentity.peerKind,
+                msgType,
+                isChannel: rawIdentity.peerKind === 'channel',
+            });
+        }
+        EventBroadcaster_1.default.emit('event:message', {
+            zaloId: accountId,
+            channel: 'telegram_user',
+            message: {
+                channel: 'telegram_user',
+                type: threadType,
+                threadId: chatId,
+                isSelf,
+                _silentNotification: suppressNotification,
+                data: {
+                    uidFrom: senderId,
+                    idTo: chatId,
+                    msgId: messageId,
+                    content,
+                    preview: (0, TelegramMessagePreview_1.getTelegramMessagePreview)(msgType, content),
+                    msgType,
+                    channel: 'telegram_user',
+                    isChannel: rawIdentity.peerKind === 'channel',
+                    ts: String(timestamp),
+                    dName: senderName,
+                    attachments,
+                },
+            },
+        });
+        if (chatId.startsWith('-100')) {
+            tgChannelRealtimeTrace('EVENT_MESSAGE_EMIT_DONE', accountId, {
+                source,
+                chatId,
+                msgId: messageId,
+                persistStatus: 'updated',
+            });
+        }
+        tgLog('info', accountId, source, `UI_EMITTED (updated) msg ${messageId}`, { chatId, msgType });
+    }
+    else if (result.status === 'duplicate') {
+        // Duplicate — KHÔNG emit UI event.
+        // Temp message trong store đã có local_paths và hiển thị đúng.
+        // Real message trong DB có metadata (attachments, reactions) từ socket echo.
+        // Emit event → renderer thay temp bằng real → mất local_paths → "Đang tải về...".
+        tgLog('info', accountId, source, `dedup msg ${messageId} (kept temp, DB enriched)`, { chatId });
+        // For self-sent messages: socket echo merges attachments into DB, but UI store needs update
+        // Emit event so addMessage can merge attachments into existing temp/real message
+        if (isSelf && attachments && attachments.length > 0) {
+            EventBroadcaster_1.default.emit('event:message', {
+                zaloId: accountId,
+                channel: 'telegram_user',
+                message: {
+                    channel: 'telegram_user',
+                    type: threadType,
+                    threadId: chatId,
+                    isSelf,
+                    _silentNotification: true,
+                    data: {
+                        uidFrom: senderId,
+                        idTo: chatId,
+                        msgId: messageId,
+                        content,
+                        preview: (0, TelegramMessagePreview_1.getTelegramMessagePreview)(msgType, content),
+                        msgType,
+                        channel: 'telegram_user',
+                        isChannel: rawIdentity.peerKind === 'channel',
+                        ts: String(timestamp),
+                        dName: senderName,
+                        attachments,
+                    },
+                },
+            });
+            tgLog('info', accountId, source, `UI_EMITTED (self-dedup with attachments) msg ${messageId}`, { chatId, msgType });
+        }
+    }
+    // Emit the message before queuing its media. A small sticker can finish
+    // downloading before the renderer has inserted the message into its cache;
+    // in that ordering event:localPath is dropped from the live timeline and the
+    // sticker only appears after reopening the conversation from the DB.
+    if (result.status === 'inserted' && source === 'socket' && senderId && client) {
+        // Name/avatar enrichment has its own event and may finish after the bubble.
+        hydrateTelegramIdentity(accountId, client, senderId, threadType === 1 ? chatId : undefined, message.sender)
+            .catch(() => { });
+    }
+    if (result.status === 'inserted' && message.media && client) {
+        tgDebugLog(`[TG:handleNew] STEP6 msgId=${messageId} hasMedia=true isSelf=${isSelf} source=${source} msgType=${msgType} result=${result.status}`);
+        downloadMediaForMessage(accountId, client, message, messageId, msgType, chatId).catch(err => {
+            Logger_1.default.error(`[TG:download] QUEUE_FAILED msgId=${messageId} error=${err.message}`);
+        });
+    }
+    return result;
+}
+// ─── Media Download ──────────────────────────────────────────────────────────
+/**
+ * Download media từ Telegram message và cập nhật local_paths trong DB.
+ * Chạy background, không block message processing.
+ */
+/** Serialize and deduplicate all exported-DC downloads for one account. */
+function queueTelegramDownload(accountId, resourceKey, operation) {
+    const key = `${accountId}:${resourceKey}`;
+    const existing = inFlightDownloadKeys.get(key);
+    if (existing)
+        return existing;
+    const previous = mediaDownloadQueues.get(accountId) || Promise.resolve();
+    const task = previous.catch(() => undefined).then(() => operation());
+    let settled;
+    settled = task.finally(() => {
+        if (mediaDownloadQueues.get(accountId) === settled)
+            mediaDownloadQueues.delete(accountId);
+        if (inFlightDownloadKeys.get(key) === settled)
+            inFlightDownloadKeys.delete(key);
+    });
+    mediaDownloadQueues.set(accountId, settled);
+    inFlightDownloadKeys.set(key, settled);
+    return settled;
+}
+function downloadProfilePhotoQueued(accountId, client, peer, resourceId, isBig) {
+    return queueTelegramDownload(accountId, `avatar:${resourceId}:${isBig ? 'big' : 'small'}`, () => client.downloadProfilePhoto(peer, { isBig }));
+}
+function downloadMediaForMessage(accountId, client, message, messageId, msgType, threadId) {
+    return queueTelegramDownload(accountId, `media:${threadId}:${messageId}`, () => downloadMediaForMessageNow(accountId, client, message, messageId, msgType, threadId));
+}
+async function downloadMediaForMessageNow(accountId, client, message, messageId, msgType, threadId) {
+    tgDebugLog(`[TG:download] START msgId=${messageId} msgType=${msgType} threadId=${threadId}`);
+    const db = DatabaseService_1.default.getInstance();
+    if (!db)
+        return null;
+    try {
+        // Download media buffer từ GramJS
+        const mediaResult = await client.downloadMedia(message);
+        if (!mediaResult || mediaResult.length === 0) {
+            tgLog('warn', accountId, 'history', 'MEDIA_DOWNLOAD_EMPTY', {
+                chatId: threadId,
+                messageId,
+                msgType,
+            });
+            return null;
+        }
+        const buffer = Buffer.from(mediaResult);
+        // Determine file extension
+        const ext = getMediaExtension(msgType, message);
+        const filename = `${accountId}_${threadId}_${messageId}${ext}`;
+        // Save to disk
+        const localPath = await saveMediaToDisk(buffer, filename, msgType);
+        if (!localPath)
+            return null;
+        // Update local_paths trong DB
+        const localPaths = {};
+        // Detect actual media type for webpage messages
+        let effectiveMsgType = msgType;
+        if (msgType === 'telegram.webpage') {
+            try {
+                const webpage = message?.media?.webpage;
+                if (webpage?.photo)
+                    effectiveMsgType = 'photo';
+                else if (webpage?.document) {
+                    const mime = String(webpage.document?.mimeType || '');
+                    if (mime.includes('video'))
+                        effectiveMsgType = 'video';
+                    else if (mime.includes('audio'))
+                        effectiveMsgType = 'audio';
+                    else
+                        effectiveMsgType = 'file';
+                }
+            }
+            catch { }
+        }
+        if (effectiveMsgType === 'photo')
+            localPaths.main = localPath;
+        else if (effectiveMsgType === 'video')
+            localPaths.video = localPath;
+        else if (effectiveMsgType === 'audio')
+            localPaths.voice = localPath;
+        else
+            localPaths.file = localPath;
+        db.run(`UPDATE messages SET local_paths = ? WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [JSON.stringify(localPaths), messageId, accountId, threadId]);
+        // Broadcast local path update to UI
+        EventBroadcaster_1.default.emit('event:localPath', {
+            zaloId: accountId,
+            msgId: messageId,
+            threadId,
+            localPaths,
+        });
+        tgDebugLog(`[TG:download] DONE msgId=${messageId} msgType=${msgType} localPath=${localPath} localPaths=${JSON.stringify(localPaths)}`);
+        return localPath;
+    }
+    catch (err) {
+        Logger_1.default.error(`[TG:download] FAILED msgId=${messageId} error=${err.message}`);
+        tgLog('warn', accountId, 'history', 'MEDIA_DOWNLOAD_FAILED', {
+            chatId: threadId,
+            messageId,
+            msgType,
+            error: err?.message || String(err),
+        });
+        return null;
+    }
+}
+function getMediaExtension(msgType, message) {
+    if (msgType === 'photo')
+        return '.jpg';
+    if (msgType === 'video')
+        return '.mp4';
+    if (msgType === 'gif')
+        return '.mp4'; // Telegram GIFs are MPEG4
+    if (msgType === 'video_note')
+        return '.mp4';
+    if (msgType === 'audio') {
+        if (message.voice)
+            return '.ogg';
+        return '.mp3';
+    }
+    if (msgType === 'sticker') {
+        const stickerMime = String(message.document?.mimeType || message.sticker?.mimeType || '');
+        if (stickerMime.includes('tgsticker') || stickerMime.includes('lottie'))
+            return '.tgs';
+        if (stickerMime.includes('webm'))
+            return '.webm';
+        if (stickerMime.includes('mp4'))
+            return '.mp4';
+        if (stickerMime.includes('webp'))
+            return '.webp';
+        return '.webp';
+    }
+    // MessageMediaWebPage: detect actual media type inside webpage
+    if (msgType === 'telegram.webpage') {
+        try {
+            const webpage = message?.media?.webpage;
+            if (webpage?.photo)
+                return '.jpg';
+            if (webpage?.document) {
+                const doc = webpage.document;
+                const mime = String(doc?.mimeType || '');
+                if (mime.includes('video'))
+                    return '.mp4';
+                if (mime.includes('audio'))
+                    return '.mp3';
+                if (mime.includes('gif'))
+                    return '.mp4';
+                // Try filename extension
+                const attrs = doc?.attributes || [];
+                const fnAttr = attrs.find((a) => a.className === 'DocumentAttributeFilename');
+                if (fnAttr?.fileName) {
+                    const dot = fnAttr.fileName.lastIndexOf('.');
+                    if (dot > 0)
+                        return fnAttr.fileName.substring(dot);
+                }
+                return '.bin';
+            }
+        }
+        catch { }
+        return '.jpg'; // fallback: webpage often has photo thumbnail
+    }
+    // File: try get extension from document attributes
+    try {
+        const doc = message.document;
+        const attrs = doc?.attributes || [];
+        const fileNameAttr = attrs.find((a) => a.className === 'DocumentAttributeFilename');
+        if (fileNameAttr?.fileName) {
+            const dot = fileNameAttr.fileName.lastIndexOf('.');
+            if (dot > 0)
+                return fileNameAttr.fileName.substring(dot);
+        }
+    }
+    catch { }
+    return '.bin';
+}
+async function saveMediaToDisk(buffer, filename, msgType) {
+    try {
+        const baseDir = FileStorageService_1.default.getBaseDir();
+        // Determine subfolder by type — lưu cùng cấu trúc với Zalo media
+        let subfolder = 'files';
+        if (msgType === 'photo')
+            subfolder = 'images';
+        else if (msgType === 'video')
+            subfolder = 'videos';
+        else if (msgType === 'audio')
+            subfolder = 'voices';
+        else if (msgType === 'sticker')
+            subfolder = 'stickers';
+        // Extract accountId from filename (format: accountId_threadId_msgId.ext)
+        const parts = filename.split('_');
+        const accountId = parts[0] || 'unknown';
+        const mediaDir = path.join(baseDir, accountId, subfolder);
+        if (!fs.existsSync(mediaDir)) {
+            fs.mkdirSync(mediaDir, { recursive: true });
+        }
+        const filePath = path.join(mediaDir, filename);
+        fs.writeFileSync(filePath, buffer);
+        // Auto-fix non-faststart MP4 files (moov atom at end → move to front)
+        // Without faststart, <video> element can't read metadata and fails to play
+        if (msgType === 'video' && filename.endsWith('.mp4')) {
+            ensureFaststart(filePath).catch(err => {
+                Logger_1.default.warn(`[TG:download] faststart fix failed for ${filename}: ${err.message}`);
+            });
+        }
+        return filePath;
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * Ensure MP4 file has moov atom at the beginning (faststart).
+ * If not, run ffmpeg to move moov to front without re-encoding.
+ * This is critical for <video> element to read metadata for playback.
+ */
+async function ensureFaststart(filePath) {
+    const { spawnSync } = require('child_process');
+    // Get ffmpeg binary path
+    let ffmpegBin = 'ffmpeg';
+    try {
+        let ffmpegStatic = require('ffmpeg-static');
+        if (ffmpegStatic && ffmpegStatic.includes('app.asar') && !ffmpegStatic.includes('app.asar.unpacked')) {
+            ffmpegStatic = ffmpegStatic.replace('app.asar', 'app.asar.unpacked');
+        }
+        if (ffmpegStatic && fs.existsSync(ffmpegStatic)) {
+            ffmpegBin = ffmpegStatic;
+        }
+    }
+    catch { }
+    // Check if already faststart by scanning first 64KB for moov atom
+    try {
+        const scanBuf = Buffer.alloc(Math.min(fs.statSync(filePath).size, 64 * 1024));
+        const fd = fs.openSync(filePath, 'r');
+        fs.readSync(fd, scanBuf, 0, scanBuf.length, 0);
+        fs.closeSync(fd);
+        let offset = 0;
+        while (offset < scanBuf.length - 8) {
+            const boxSize = scanBuf.readUInt32BE(offset);
+            const boxType = scanBuf.toString('ascii', offset + 4, offset + 8);
+            if (boxType === 'moov') {
+                Logger_1.default.log(`[faststart] ${filePath} already faststart`);
+                return; // Already faststart, nothing to do
+            }
+            if (boxSize < 8)
+                break;
+            offset += boxSize;
+        }
+    }
+    catch { }
+    // Not faststart — fix with ffmpeg
+    Logger_1.default.log(`[faststart] Fixing non-faststart MP4: ${filePath}`);
+    const tempPath = filePath + '.faststart.tmp.mp4';
+    try {
+        const result = spawnSync(ffmpegBin, [
+            '-y', '-i', filePath,
+            '-c', 'copy',
+            '-movflags', '+faststart',
+            tempPath,
+        ], { timeout: 120000, stdio: 'pipe' });
+        if (result.status === 0 && fs.existsSync(tempPath)) {
+            // Replace original with fixed version
+            fs.renameSync(tempPath, filePath);
+            Logger_1.default.log(`[faststart] Fixed: ${filePath}`);
+        }
+        else {
+            // Cleanup temp file on failure
+            try {
+                fs.unlinkSync(tempPath);
+            }
+            catch { }
+            const stderr = result.stderr?.toString() || '';
+            Logger_1.default.warn(`[faststart] ffmpeg failed (exit=${result.status}): ${stderr.slice(0, 200)}`);
+        }
+    }
+    catch (err) {
+        try {
+            fs.unlinkSync(tempPath);
+        }
+        catch { }
+        Logger_1.default.warn(`[faststart] ffmpeg error: ${err.message}`);
+    }
+}
+// ─── Fetch New Contact Avatar ─────────────────────────────────────────────────
+/**
+ * Resolve group info for a new group that was created from a message with just an ID.
+ * Fetches the group entity, updates the contact name/avatar, and emits a refresh event.
+ */
+async function resolveNewGroupInfo(accountId, client, chatId) {
+    try {
+        const entity = await resolvePeerEntity(accountId, client, chatId);
+        if (!entity)
+            return;
+        const db = DatabaseService_1.default.getInstance();
+        if (!db)
+            return;
+        // Get display name from entity
+        const displayName = entity.title || [entity.firstName, entity.lastName].filter(Boolean).join(' ') || entity.username || '';
+        if (!displayName || displayName === chatId)
+            return;
+        // Update contact in DB
+        db.run(`UPDATE contacts SET display_name = ? WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user' AND (display_name = '' OR display_name = contact_id)`, [displayName, accountId, chatId]);
+        // Cache the peer for future use
+        cacheTelegramPeer(accountId, chatId, entity);
+        // Try to fetch avatar
+        try {
+            const photo = await downloadProfilePhotoQueued(accountId, client, entity, `group:${chatId}`, false);
+            if (photo?.length) {
+                const savedPath = await saveAvatarToDisk(Buffer.from(photo), `tg_group_${chatId}_${Date.now()}.jpg`);
+                if (savedPath) {
+                    const normalized = savedPath.replace(/\\/g, '/');
+                    const avatarUrl = 'local-media://' + (normalized.startsWith('/') ? normalized : '/' + normalized);
+                    db.run(`UPDATE contacts SET avatar_url = ? WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, [avatarUrl, accountId, chatId]);
+                }
+            }
+        }
+        catch { }
+        // Emit event to refresh conversation list in renderer
+        EventBroadcaster_1.default.emit('db:unreadChanged', {
+            zaloId: accountId,
+            source: 'telegram_new_group_resolved',
+        });
+        tgLog('info', accountId, 'history', `[resolveNewGroupInfo] Resolved group ${chatId} → "${displayName}"`);
+    }
+    catch (err) {
+        tgLog('warn', accountId, 'history', `[resolveNewGroupInfo] Failed to resolve ${chatId}: ${err.message}`);
+    }
+}
+/**
+ * Fetch avatar cho contact mới khi nhận tin nhắn.
+ * Chỉ fetch nếu contact chưa có avatar.
+ */
+async function fetchNewContactAvatar(accountId, client, chatId, chat) {
+    const db = DatabaseService_1.default.getInstance();
+    if (!db)
+        return;
+    try {
+        // Kiểm tra đã có avatar chưa
+        const existing = db.queryOne(`SELECT avatar_url, display_name FROM contacts WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, [accountId, chatId]);
+        if (existing?.avatar_url) {
+            (0, avatarFetchCache_1.markAvatarSuccess)(accountId, chatId); // Reset cache nếu đã có
+            return;
+        }
+        // Kiểm tra cache: đã thử gần đây hoặc hết lần thử
+        if (!(0, avatarFetchCache_1.shouldFetchAvatar)(accountId, chatId))
+            return;
+        (0, avatarFetchCache_1.markAvatarFetched)(accountId, chatId);
+        // Download avatar
+        let avatarUrl = '';
+        try {
+            const photo = await downloadProfilePhotoQueued(accountId, client, chat, `chat:${chatId}`, false);
+            if (photo && photo.length > 0) {
+                const avatarPath = `telegram_avatar_${chatId}_${Date.now()}.jpg`;
+                const savedPath = await saveAvatarToDisk(Buffer.from(photo), avatarPath);
+                if (savedPath) {
+                    const normalized = savedPath.replace(/\\/g, '/');
+                    avatarUrl = 'local-media://' + (normalized.startsWith('/') ? normalized : '/' + normalized);
+                }
+            }
+        }
+        catch { }
+        if (avatarUrl) {
+            db.run(`
+        UPDATE contacts SET avatar_url = ?
+        WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'
+      `, [avatarUrl, accountId, chatId]);
+            (0, avatarFetchCache_1.markAvatarSuccess)(accountId, chatId); // Reset cache khi thành công
+            EventBroadcaster_1.default.emit('db:unreadChanged', { zaloId: accountId, source: 'telegram_avatar' });
+        }
+        // Fetch thêm thông tin contact (username, phone) nếu là user
+        if (!isGroupChat(chat)) {
+            try {
+                const entity = chat;
+                if (entity?.username || entity?.phone) {
+                    const updates = [];
+                    const params = [];
+                    if (entity.phone) {
+                        updates.push('phone = ?');
+                        params.push(String(entity.phone));
+                    }
+                    if (updates.length > 0) {
+                        params.push(accountId, chatId);
+                        db.run(`UPDATE contacts SET ${updates.join(', ')} WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, params);
+                    }
+                }
+            }
+            catch { }
+        }
+    }
+    catch { }
+}
+function isGroupChat(chat) {
+    return chat?.className === 'Channel' || chat?.className === 'Chat';
+}
+function normalizeLegacyTelegramContacts(accountId) {
+    const db = DatabaseService_1.default.getInstance();
+    if (!db)
+        return;
+    const legacyContacts = db.query(`
+    SELECT contact_id FROM contacts
+    WHERE owner_zalo_id = ? AND channel = 'telegram_user'
+      AND contact_type = 'group' AND contact_id NOT LIKE '-%'
+  `, [accountId]);
+    for (const legacy of legacyContacts) {
+        const rawId = String(legacy.contact_id || '');
+        const canonical = db.queryOne(`
+      SELECT contact_id FROM contacts
+      WHERE owner_zalo_id = ? AND channel = 'telegram_user'
+        AND contact_id IN (?, ?) LIMIT 1
+    `, [accountId, `-100${rawId}`, `-${rawId}`]);
+        if (!rawId || !canonical?.contact_id)
+            continue;
+        const canonicalId = String(canonical.contact_id);
+        db.run(`
+      DELETE FROM messages AS legacy
+      WHERE legacy.owner_zalo_id = ? AND legacy.channel = 'telegram_user' AND legacy.thread_id = ?
+        AND EXISTS (
+          SELECT 1 FROM messages AS canonical
+          WHERE canonical.owner_zalo_id = legacy.owner_zalo_id
+            AND canonical.channel = legacy.channel
+            AND canonical.thread_id = ?
+            AND canonical.msg_id = legacy.msg_id
+        )
+    `, [accountId, rawId, canonicalId]);
+        db.run(`UPDATE messages SET thread_id = ? WHERE owner_zalo_id = ? AND channel = 'telegram_user' AND thread_id = ?`, [canonicalId, accountId, rawId]);
+        db.run(`DELETE FROM contacts WHERE owner_zalo_id = ? AND channel = 'telegram_user' AND contact_id = ?`, [accountId, rawId]);
+    }
+}
+function toTelegramUpdateState(state, fallback) {
+    return {
+        pts: Number(state?.pts ?? fallback.pts ?? 0),
+        qts: Number(state?.qts ?? fallback.qts ?? 0),
+        date: Number(state?.date ?? fallback.date ?? 0),
+        seq: Number(state?.seq ?? fallback.seq ?? 0),
+    };
+}
+function cacheDifferenceEntities(accountId, users = [], chats = []) {
+    const entities = new Map();
+    for (const entity of [...users, ...chats]) {
+        if (!entity)
+            continue;
+        try {
+            const peerId = getCanonicalChatId(entity);
+            if (peerId) {
+                entities.set((0, Utils_1.getPeerId)(entity), entity);
+                cacheTelegramPeer(accountId, peerId, entity);
+            }
+        }
+        catch { }
+    }
+    return entities;
+}
+async function processDifferenceMessages(accountId, client, messages, entities, source = 'global_difference') {
+    for (const message of messages || []) {
+        if (!message?.id || !message?.peerId)
+            continue;
+        const event = initializeRecoveredMessage(message, client, entities);
+        const result = await handleNewMessage(accountId, event, client, source);
+        if (result.status === 'failed') {
+            throw new Error(`Failed to persist Telegram message ${String(message.id)}`);
+        }
+    }
+}
+async function recoverTelegramUpdateDifference(accountId, client) {
+    const db = DatabaseService_1.default.getInstance();
+    const persisted = db?.getTelegramUpdateState(accountId);
+    if (!db || !persisted)
+        return 'no_state';
+    const { Api } = require('telegram');
+    let state = toTelegramUpdateState(persisted, persisted);
+    try {
+        for (let slice = 0; slice < 50; slice++) {
+            const difference = await client.invoke(new Api.updates.GetDifference({
+                pts: state.pts,
+                date: state.date,
+                qts: state.qts,
+            }));
+            if (difference instanceof Api.updates.DifferenceTooLong) {
+                Logger_1.default.warn(`[TelegramUserListener] DifferenceTooLong for ${accountId}; falling back to dialog recovery`);
+                return 'too_long';
+            }
+            if (difference instanceof Api.updates.DifferenceEmpty) {
+                db.saveTelegramUpdateState(accountId, {
+                    ...state,
+                    date: Number(difference.date || state.date),
+                    seq: Number(difference.seq || state.seq),
+                });
+                return 'complete';
+            }
+            const entities = cacheDifferenceEntities(accountId, difference.users || [], difference.chats || []);
+            await processDifferenceMessages(accountId, client, difference.newMessages || [], entities, 'global_difference');
+            const rawHandler = rawUpdateHandlers.get(accountId);
+            if (rawHandler) {
+                for (const update of difference.otherUpdates || [])
+                    await rawHandler(update);
+            }
+            const nextState = difference instanceof Api.updates.DifferenceSlice
+                ? difference.intermediateState
+                : difference.state;
+            state = toTelegramUpdateState(nextState, state);
+            db.saveTelegramUpdateState(accountId, state);
+            if (!(difference instanceof Api.updates.DifferenceSlice))
+                return 'complete';
+        }
+        Logger_1.default.warn(`[TelegramUserListener] Difference slice limit reached for ${accountId}`);
+        return 'failed';
+    }
+    catch (err) {
+        Logger_1.default.warn(`[TelegramUserListener] GetDifference failed for ${accountId}: ${err.message}`);
+        return 'failed';
+    }
+}
+async function saveCurrentTelegramUpdateState(accountId, client) {
+    const db = DatabaseService_1.default.getInstance();
+    if (!db)
+        return;
+    const { Api } = require('telegram');
+    const state = await client.invoke(new Api.updates.GetState());
+    db.saveTelegramUpdateState(accountId, toTelegramUpdateState(state, { pts: 0, qts: 0, date: 0, seq: 0 }));
+}
+async function synchronizeTelegramAccount(accountId, client, options = {}) {
+    if (recoveringUpdateAccounts.has(accountId)) {
+        // TG-04: a reconnect that lands while a previous recovery is still
+        // finishing must not be reported as a failed sync. Wait (bounded) for the
+        // current owner to release the account instead of failing fast — that
+        // made reconnect look broken while recovery was perfectly healthy.
+        const LOCK_WAIT_MS = 60000;
+        const deadline = Date.now() + LOCK_WAIT_MS;
+        while (recoveringUpdateAccounts.has(accountId) && Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        if (recoveringUpdateAccounts.has(accountId)) {
+            return { success: false, historyComplete: false, inserted: 0 };
+        }
+    }
+    recoveringUpdateAccounts.add(accountId);
+    try {
+        // Emit initial syncing status with recovery queue stats
+        const db = DatabaseService_1.default.getInstance();
+        // A previous Electron process may have been closed while a channel RPC
+        // was in flight. Such rows otherwise remain `draining` forever and will
+        // never be considered by either the backlog or the live recovery lane.
+        db?.requeueStaleChannelRecoveries(accountId);
+        const stats = db?.getChannelRecoveryStats(accountId);
+        if (stats && (stats.pending + stats.draining) > 0) {
+            EventBroadcaster_1.default.emit('event:telegramSync', {
+                zaloId: accountId,
+                status: 'syncing',
+                pending: stats.pending + stats.draining,
+                total: stats.pending + stats.draining + stats.complete,
+                inserted: 0,
+            });
+        }
+        const differenceResult = await recoverTelegramUpdateDifference(accountId, client);
+        // Channel cursors are the realtime catch-up path. Run them before the broad
+        // dialog history backfill, which may hit messages.GetHistory FLOOD_WAIT.
+        const channelResult = await recoverChannelUpdates(accountId, client, {
+            includeRecentDialogs: !!options.includeHistory || !!options.recoverRecentChannels,
+        });
+        // A complete global difference plus per-channel recovery is authoritative.
+        // Running a broad GetHistory pass anyway races channel difference (history
+        // can insert first, causing the realtime path to dedup without a UI event)
+        // and creates the FLOOD_WAIT storm observed during forum navigation.
+        if (differenceResult === 'complete' && !options.includeHistory && channelResult.ok) {
+            DatabaseService_1.default.getInstance()?.repairTelegramLastMessagePreviews(accountId, 'telegram_user');
+            return { success: true, historyComplete: true, inserted: 0 };
+        }
+        const historyResult = await fetchMissedMessages(accountId, client);
+        // Never advance a cursor after DifferenceTooLong or a failed difference:
+        // the bounded dialog backfill may still have scheduled another pass.
+        if (historyResult.success && historyResult.complete && differenceResult === 'no_state') {
+            await saveCurrentTelegramUpdateState(accountId, client);
+        }
+        DatabaseService_1.default.getInstance()?.repairTelegramLastMessagePreviews(accountId, 'telegram_user');
+        // TG-06: history succeeding does not launder a failed channel recovery
+        // into `success: true`. The caller (and the UI progress) must see it.
+        return {
+            success: historyResult.success && differenceResult !== 'failed' && channelResult.ok,
+            historyComplete: historyResult.complete && channelResult.ok,
+            inserted: historyResult.inserted,
+        };
+    }
+    finally {
+        recoveringUpdateAccounts.delete(accountId);
+        const listener = activeListeners.get(accountId);
+        if (listener?.client === client && listener.client.connected && !listener.stopped) {
+            pollChannelUpdates(listener).catch(() => { });
+        }
+    }
+}
+async function waitForTelegramAccountSync(accountId, timeoutMs = 30000) {
+    const startedAt = Date.now();
+    while (recoveringUpdateAccounts.has(accountId) || syncingAccounts.has(accountId)) {
+        if (Date.now() - startedAt >= timeoutMs)
+            return false;
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    return true;
+}
+/**
+ * Explicit user-triggered catch-up. Unlike the reconnect fast path, this always
+ * checks dialog history after draining Telegram update cursors. Persistence is
+ * idempotent, so replayed socket/difference/history messages do not increment
+ * unread state or emit a second new-message event.
+ */
+async function refreshAccountMessages(accountId) {
+    const listener = activeListeners.get(accountId);
+    if (!listener?.client || !listener.connected || !listener.client.connected || listener.stopped) {
+        return { success: false, error: 'Tài khoản Telegram chưa kết nối' };
+    }
+    const idle = await waitForTelegramAccountSync(accountId);
+    if (!idle) {
+        return { success: false, error: 'Telegram vẫn đang đồng bộ. Vui lòng thử lại sau.' };
+    }
+    try {
+        const result = await synchronizeTelegramAccount(accountId, listener.client, { includeHistory: true });
+        if (!result.success) {
+            return { success: false, error: 'Không thể hoàn tất đồng bộ tin nhắn Telegram' };
+        }
+        return {
+            success: true,
+            inserted: result.inserted,
+            pending: !result.historyComplete,
+        };
+    }
+    catch (err) {
+        Logger_1.default.warn(`[TelegramUserListener] Manual refresh failed for ${accountId}: ${err.message}`);
+        return { success: false, error: err.message || 'Không thể đồng bộ tin nhắn Telegram' };
+    }
+}
+/**
+ * Start a user-requested full Telegram catch-up without holding an IPC invoke
+ * open for every dialog/history request. The renderer receives an immediate
+ * acknowledgement, while completion is reported through event:telegramSync.
+ */
+function startAccountMessageRefresh(accountId) {
+    const listener = activeListeners.get(accountId);
+    if (!listener?.client || !listener.connected || !listener.client.connected || listener.stopped) {
+        return { success: false, error: 'Tài khoản Telegram chưa kết nối' };
+    }
+    if (manualRefreshTasks.has(accountId)) {
+        return { success: true, started: false, pending: true };
+    }
+    const client = listener.client;
+    const task = (async () => {
+        EventBroadcaster_1.default.emit('event:telegramSync', { zaloId: accountId, status: 'started' });
+        // A reconnect catch-up may already be active. Waiting here is safe because
+        // this is a background task; the topbar must never time out while it waits.
+        const idle = await waitForTelegramAccountSync(accountId, 5 * 60000);
+        if (!idle) {
+            EventBroadcaster_1.default.emit('event:telegramSync', {
+                zaloId: accountId,
+                status: 'failed',
+                error: 'Telegram đang bận đồng bộ quá lâu. Vui lòng thử lại sau.',
+            });
+            return;
+        }
+        if (listener.client !== client || listener.stopped || !client.connected) {
+            EventBroadcaster_1.default.emit('event:telegramSync', {
+                zaloId: accountId,
+                status: 'failed',
+                error: 'Kết nối Telegram đã bị ngắt trong lúc đồng bộ.',
+            });
+            return;
+        }
+        const result = await refreshAccountMessages(accountId);
+        EventBroadcaster_1.default.emit('event:telegramSync', result.success
+            ? { zaloId: accountId, status: 'completed', inserted: result.inserted || 0, pending: !!result.pending }
+            : { zaloId: accountId, status: 'failed', error: result.error || 'Không thể đồng bộ tin nhắn Telegram' });
+    })();
+    manualRefreshTasks.set(accountId, task);
+    task.finally(() => {
+        if (manualRefreshTasks.get(accountId) === task)
+            manualRefreshTasks.delete(accountId);
+    }).catch(() => { });
+    return { success: true, started: true, pending: true };
+}
+/**
+ * Phase D: Recover updates for channels/supergroups using per-channel PTS.
+ * Uses drainChannelDifference for proper state machine handling.
+ * Each channel has its own PTS independent of the global PTS.
+ *
+ * Discovery strategy (DB-first):
+ * 1. Enqueue all channels known in DB (messages + channel_pts) with priority
+ * 2. Paginate API dialogs to discover new/missing channels
+ * 3. Dequeue from persistent recovery queue for processing
+ */
+async function recoverChannelUpdates(accountId, client, options = {}) {
+    const db = DatabaseService_1.default.getInstance();
+    if (!db)
+        return { ok: false, errors: ['no_db'] };
+    const errors = [];
+    try {
+        // Phase 1: Enqueue all channels known in DB with appropriate priority
+        if (options.includeRecentDialogs) {
+            const knownChannelIds = db.getTelegramChannelIdsWithMessages(accountId);
+            for (const channelId of knownChannelIds) {
+                const pts = db.getTelegramChannelPts(accountId, channelId);
+                const peer = db.getTelegramPeer(accountId, channelId);
+                const priority = pts > 0 ? 30 : 10; // Has PTS = higher priority
+                db.enqueueChannelRecovery(accountId, channelId, peer?.access_hash || '', pts, priority);
+            }
+            tgLog('info', accountId, 'channel_difference', `Enqueued ${knownChannelIds.length} DB-known channels for recovery`);
+            // Phase 2: Discover recent dialogs. Let GramJS own the pagination cursor
+            // (date + message ID + peer); passing its Date object back as offsetDate
+            // caused an int32/millisecond mismatch and stopped at page two.
+            const discoveredChannelIds = new Set();
+            const MAX_DIALOG_PAGES = 5; // Safety: max 5 pages × ~100 dialogs = 500 max
+            const DIALOG_PAGE_SIZE = 100;
+            const dialogs = await client.getDialogs({ limit: MAX_DIALOG_PAGES * DIALOG_PAGE_SIZE });
+            for (let page = 0; page < MAX_DIALOG_PAGES; page++) {
+                if (listener_stopped(accountId))
+                    break;
+                try {
+                    const pageDialogs = dialogs.slice(page * DIALOG_PAGE_SIZE, (page + 1) * DIALOG_PAGE_SIZE);
+                    if (pageDialogs.length === 0)
+                        break;
+                    for (const dialog of pageDialogs) {
+                        const channelId = getCanonicalChatId(dialog.id);
+                        if (!channelId?.startsWith('-100'))
+                            continue;
+                        if (discoveredChannelIds.has(channelId))
+                            continue;
+                        discoveredChannelIds.add(channelId);
+                        if (dialog.entity)
+                            cacheTelegramPeer(accountId, channelId, dialog.entity);
+                        const hasCursor = db.getTelegramChannelPts(accountId, channelId) > 0;
+                        const hasMessages = !!db.queryOne(`SELECT 1 FROM messages
+               WHERE owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'
+               LIMIT 1`, [accountId, channelId]);
+                        const entityAny = dialog.entity;
+                        if (hasCursor || hasMessages) {
+                            const priority = hasCursor ? 30 : 10;
+                            db.enqueueChannelRecovery(accountId, channelId, entityAny?.accessHash || '', db.getTelegramChannelPts(accountId, channelId), priority);
+                        }
+                        else {
+                            // TG-01: a member channel we have never synced must still get a
+                            // bootstrap job. Gating on local history meant newly joined /
+                            // newly discovered channels stayed silent until the user opened
+                            // them by hand.
+                            db.enqueueChannelRecovery(accountId, channelId, entityAny?.accessHash || '', 0, 5);
+                        }
+                    }
+                    // TG-01: never stop because this slice happened to hold only DMs or
+                    // already-known channels. A later slice/page may still contain
+                    // channels that need recovery; only the end of the list stops us.
+                }
+                catch (err) {
+                    tgLog('warn', accountId, 'channel_difference', `Dialog page ${page} failed: ${err.message}`);
+                    errors.push(`dialog_page:${err.message}`);
+                    break;
+                }
+            }
+            // Also scan archived dialogs. TG-02: "Khác" must get the same inventory
+            // budget as the main folder — a single 100-dialog page silently dropped
+            // every archived channel past that page.
+            try {
+                const archivedDialogs = await client.getDialogs({ limit: MAX_DIALOG_PAGES * DIALOG_PAGE_SIZE, folder: 1 });
+                for (const dialog of archivedDialogs) {
+                    const channelId = getCanonicalChatId(dialog.id);
+                    if (!channelId?.startsWith('-100') || discoveredChannelIds.has(channelId))
+                        continue;
+                    discoveredChannelIds.add(channelId);
+                    if (dialog.entity)
+                        cacheTelegramPeer(accountId, channelId, dialog.entity);
+                    const hasCursor = db.getTelegramChannelPts(accountId, channelId) > 0;
+                    const hasMessages = !!db.queryOne(`SELECT 1 FROM messages
+             WHERE owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'
+             LIMIT 1`, [accountId, channelId]);
+                    const entityAny = dialog.entity;
+                    if (hasCursor || hasMessages) {
+                        db.enqueueChannelRecovery(accountId, channelId, entityAny?.accessHash || '', db.getTelegramChannelPts(accountId, channelId), hasCursor ? 30 : 10);
+                    }
+                    else {
+                        db.enqueueChannelRecovery(accountId, channelId, entityAny?.accessHash || '', 0, 5);
+                    }
+                }
+            }
+            catch (err) {
+                tgLog('warn', accountId, 'channel_difference', `Archived dialog scan failed: ${err.message}`);
+                errors.push(`archive_scan:${err.message}`);
+            }
+        }
+        // Phase 3: Dequeue and process from persistent recovery queue
+        const queuedChannels = db.dequeueChannelRecovery(accountId, 200);
+        // Also include active channel leases from RAM. These bypass the folder
+        // order because the user is looking at them now; every other queued item
+        // keeps the DB order: Tất cả → unread/recent → Archived/Khác.
+        const activeChannelIds = getActiveChannelRecoveryOrder(accountId);
+        const activeIndex = new Map(activeChannelIds.map((channelId, index) => [channelId, index]));
+        for (const channelId of activeChannelIds) {
+            if (!queuedChannels.find(channel => channel.channel_id === channelId)) {
+                const pts = db.getTelegramChannelPts(accountId, channelId);
+                queuedChannels.push({
+                    channel_id: channelId,
+                    access_hash: '',
+                    pts,
+                    priority: URGENT_CHANNEL_RECOVERY_PRIORITY,
+                    attempts: 0,
+                    queued: false,
+                });
+            }
+        }
+        queuedChannels.sort((a, b) => {
+            const aActiveIndex = activeIndex.get(a.channel_id);
+            const bActiveIndex = activeIndex.get(b.channel_id);
+            if (aActiveIndex !== undefined || bActiveIndex !== undefined) {
+                return (aActiveIndex ?? Number.MAX_SAFE_INTEGER) - (bActiveIndex ?? Number.MAX_SAFE_INTEGER);
+            }
+            return 0;
+        });
+        tgLog('info', accountId, 'channel_difference', `Processing ${queuedChannels.length} channels from recovery queue`);
+        const listener = activeListeners.get(accountId);
+        if (listener) {
+            await runChannelRecoveryWorkers(listener, client, queuedChannels, 'channel_difference');
+        }
+        // Cleanup old completed entries periodically
+        db.cleanupChannelRecoveryQueue(accountId);
+    }
+    catch (err) {
+        tgLog('warn', accountId, 'channel_difference', `recoverChannelUpdates error: ${err.message}`);
+        errors.push(`recover:${err.message}`);
+    }
+    return { ok: errors.length === 0, errors };
+}
+/** Check if the listener for this account has been stopped. */
+function listener_stopped(accountId) {
+    const listener = activeListeners.get(accountId);
+    return !listener || listener.stopped || !listener.client?.connected;
+}
+/**
+ * Try to repair a missing access_hash by resolving the channel entity.
+ * Returns true if repair succeeded.
+ */
+async function repairAccessHash(accountId, client, channelId, peer) {
+    try {
+        // If peer has a username, try resolving via @username
+        if (peer?.username) {
+            const { Api } = require('telegram');
+            const result = await client.invoke(new Api.contacts.ResolveUsername({ username: peer.username }));
+            if (result?.channel) {
+                cacheTelegramPeer(accountId, channelId, result.channel);
+                return true;
+            }
+        }
+        // Try resolvePeer with the channel ID
+        const entity = await resolvePeerEntity(accountId, client, channelId);
+        if (entity) {
+            cacheTelegramPeer(accountId, channelId, entity);
+            return true;
+        }
+    }
+    catch (err) {
+        tgLog('warn', accountId, 'channel_difference', `Access hash repair failed for ${channelId}: ${err.message}`);
+    }
+    return false;
+}
+async function fetchMissedMessages(accountId, client) {
+    const db = DatabaseService_1.default.getInstance();
+    if (!db || syncingAccounts.has(accountId))
+        return { success: false, complete: false, inserted: 0 };
+    syncingAccounts.add(accountId);
+    let needsFollowUpSync = false;
+    let inventoryTruncated = false;
+    let archiveFetchFailed = false;
+    try {
+        // Lấy thời gian tin nhắn cuối cùng đã lưu trong DB
+        normalizeLegacyTelegramContacts(accountId);
+        const existingCount = db.queryOne(`SELECT COUNT(*) as count FROM messages WHERE owner_zalo_id = ? AND channel = 'telegram_user'`, [accountId]);
+        const isFirstSync = (existingCount?.count || 0) === 0;
+        // Lấy tất cả cuộc hội thoại (dialogs) — limit cao hơn cho lần đầu
+        const dialogLimit = isFirstSync ? INITIAL_DIALOG_LIMIT : RECENT_DIALOG_LIMIT;
+        const dialogs = await client.getDialogs({ limit: dialogLimit });
+        // Lấy thêm archived dialogs (folder=1) để đồng bộ vào "Khác"
+        let archivedDialogs = [];
+        try {
+            archivedDialogs = await client.getDialogs({ limit: dialogLimit, folder: 1 });
+        }
+        catch (err) {
+            archiveFetchFailed = true;
+            Logger_1.default.warn(`[TelegramUserListener] Failed to fetch archived dialogs: ${err.message}`);
+        }
+        // TG-06: a capped dialog list is not a complete inventory. GramJS returns a
+        // TotalList whose `total` is the server-side count; if either leg was cut
+        // off we must not report this pass as a finished recovery epoch.
+        const inventoryLegTruncated = (list, limit) => {
+            const total = Number(list?.total ?? list.length);
+            return list.length >= limit || total > list.length;
+        };
+        if (inventoryLegTruncated(dialogs, dialogLimit) || inventoryLegTruncated(archivedDialogs, dialogLimit)) {
+            inventoryTruncated = true;
+        }
+        // Gộp dialogs, dedup theo chatId (archived có thể trùng với main nếu user archive/recently)
+        const allDialogs = [...dialogs];
+        const seenIds = new Set(dialogs.map((d) => getCanonicalChatId(d.id)));
+        for (const ad of archivedDialogs) {
+            const adId = getCanonicalChatId(ad.id);
+            if (adId && !seenIds.has(adId)) {
+                allDialogs.push(ad);
+                seenIds.add(adId);
+            }
+        }
+        let totalSynced = 0;
+        for (const dialog of allDialogs) {
+            const chatId = getCanonicalChatId(dialog.id);
+            if (!chatId)
+                continue;
+            if (dialog.entity)
+                cacheTelegramPeer(accountId, chatId, dialog.entity);
+            // Dialog metadata is independent from message history. Persist it even
+            // when this dialog has no new messages so archive/mute/send rights stay
+            // synchronized with Telegram.
+            persistTelegramDialogState(accountId, chatId, dialog, dialog.entity);
+            // Fetch tin nhắn gần nhất từ mỗi cuộc hội thoại
+            // The first sync is deliberately bounded. On reconnect, load every
+            // message after the newest durable ID for this dialog instead of an
+            // arbitrary recent window. Telegram IDs are monotonic per peer,
+            // including all topics below the same forum parent.
+            let messages;
+            if (isFirstSync) {
+                messages = await client.getMessages(dialog.id, { limit: INITIAL_MESSAGES_PER_DIALOG });
+            }
+            else {
+                const minId = getTelegramHistoryCheckpoint(db, accountId, chatId);
+                if (!minId) {
+                    // A newly discovered dialog has no local checkpoint yet. Treat it
+                    // as a bounded first-load rather than unexpectedly downloading its
+                    // whole history during an unrelated reconnect.
+                    messages = await client.getMessages(dialog.id, { limit: INITIAL_MESSAGES_PER_DIALOG });
+                }
+                else {
+                    messages = [];
+                    for await (const message of client.iterMessages(dialog.id, {
+                        minId,
+                        limit: RECOVERY_MESSAGES_PER_DIALOG,
+                        // Oldest first means a bounded follow-up can safely advance the
+                        // durable max ID without skipping a gap in the middle.
+                        reverse: true,
+                    })) {
+                        messages.push(message);
+                    }
+                    if (messages.length === RECOVERY_MESSAGES_PER_DIALOG) {
+                        needsFollowUpSync = true;
+                        Logger_1.default.warn(`[TelegramUserListener] Recovery cap reached for ${accountId}/${chatId}; another sync pass is required`);
+                    }
+                }
+            }
+            // Sort ASC by timestamp — message cuối cùng trong loop sẽ là mới nhất
+            messages.sort((a, b) => (a.date || 0) - (b.date || 0));
+            for (const msg of messages) {
+                const msgTimestamp = (msg.date || 0) * 1000;
+                const messageId = String(msg.id);
+                if (!messageId)
+                    continue;
+                // Phase B: Use persistTelegramMessage for idempotency
+                const senderId = String(msg.senderId?.valueOf() || '');
+                const isSelf = msg.out || false;
+                const isGroup = dialog.isChannel || dialog.isGroup;
+                const threadType = isGroup ? 1 : 0;
+                // Resolve sender name for group last_message preview
+                let senderName = '';
+                if (isGroup && !isSelf) {
+                    try {
+                        const sender = await msg.getSender?.();
+                        if (sender) {
+                            senderName = sender.firstName
+                                ? [sender.firstName, sender.lastName].filter(Boolean).join(' ')
+                                : sender.title || sender.username || '';
+                        }
+                    }
+                    catch { }
+                }
+                const dialogPeerType = dialog.entity
+                    ? getTelegramPeerType(dialog.entity)
+                    : db.getTelegramPeer(accountId, chatId)?.peer_type;
+                const { content, msgType, attachments } = normalizeTelegramMessageMedia(msg, dialogPeerType);
+                const reactions = normalizeTelegramReactions(msg.reactions, accountId);
+                const displayContent = content || (() => {
+                    if (msgType === 'audio')
+                        return '🎵 Audio';
+                    if (msgType !== 'text')
+                        return '';
+                    return '';
+                })();
+                if (!displayContent && msgType === 'text')
+                    continue;
+                // Use idempotent persist — returns inserted/duplicate
+                const result = persistTelegramMessage(db, {
+                    msgId: messageId, accountId, chatId, threadType,
+                    senderId, content: displayContent, msgType, timestamp: msgTimestamp,
+                    isSelf, attachments, topicId: getForumTopicId(msg), reactions,
+                });
+                // Side effects only on actual insert (P1.5)
+                if (result.status === 'inserted') {
+                    // Media download for recent messages only
+                    if (attachments.some((attachment) => attachment.type !== 'telegram_post'
+                        && attachment.type !== 'telegram_grouped_media'
+                        && attachment.type !== 'custom_emoji') && client) {
+                        const isRecent = (Date.now() - msgTimestamp) < 24 * 60 * 60 * 1000;
+                        if (isRecent) {
+                            downloadMediaForMessage(accountId, client, msg, messageId, msgType, chatId).catch(() => { });
+                        }
+                    }
+                    // Update contacts — chỉ cập nhật last_message, KHÔNG increment unread_count
+                    // (unread_count đã được đồng bộ chính xác từ Telegram dialog trong persistTelegramDialogState)
+                    const chatTitle = dialog.title || chatId;
+                    db.run(`
+            INSERT INTO contacts (owner_zalo_id, contact_id, display_name, avatar_url, is_friend, contact_type, unread_count, last_message, last_message_time, channel)
+            VALUES (?, ?, ?, '', 0, ?, 0, ?, ?, 'telegram_user')
+            ON CONFLICT(owner_zalo_id, contact_id) DO UPDATE SET
+              display_name = CASE WHEN excluded.display_name != '' AND contacts.display_name = '' THEN excluded.display_name ELSE contacts.display_name END,
+              last_message = CASE WHEN excluded.last_message_time >= COALESCE(contacts.last_message_time, 0) THEN excluded.last_message ELSE contacts.last_message END,
+              last_message_time = CASE WHEN excluded.last_message_time >= COALESCE(contacts.last_message_time, 0) THEN excluded.last_message_time ELSE contacts.last_message_time END,
+              channel = 'telegram_user'
+          `, [accountId, chatId, chatTitle, isGroup ? 'group' : 'user', (0, TelegramMessagePreview_1.getTelegramMessagePreview)(msgType, content), msgTimestamp]);
+                    totalSynced++;
+                }
+            }
+        }
+        if (totalSynced > 0) {
+            Logger_1.default.log(`[TelegramUserListener] Synced ${totalSynced} missed messages for ${accountId}`);
+        }
+        // Avatar hydration is demand-driven. Bulk profile downloads at login open
+        // exported DC senders and can destabilize the primary MTProto transport.
+        // Broadcast để UI refresh
+        EventBroadcaster_1.default.emit('db:unreadChanged', { zaloId: accountId, source: 'telegram_sync' });
+        // TG-06: success/complete must describe what this pass actually covered.
+        // A failed archive leg or a truncated dialog list is partial work — the
+        // scheduler needs to see that, not a green checkmark.
+        return {
+            success: !archiveFetchFailed,
+            complete: !needsFollowUpSync && !inventoryTruncated && !archiveFetchFailed,
+            inserted: totalSynced,
+        };
+    }
+    catch (err) {
+        Logger_1.default.warn(`[TelegramUserListener] fetchMissedMessages error: ${err.message}`);
+        return { success: false, complete: false, inserted: 0 };
+    }
+    finally {
+        syncingAccounts.delete(accountId);
+        if (needsFollowUpSync && activeListeners.get(accountId)?.client === client) {
+            setTimeout(() => {
+                synchronizeTelegramAccount(accountId, client, {
+                    includeHistory: true,
+                    recoverRecentChannels: true,
+                }).then(result => {
+                    EventBroadcaster_1.default.emit('event:telegramSync', result.success
+                        ? { zaloId: accountId, status: 'completed', inserted: result.inserted, pending: !result.historyComplete }
+                        : { zaloId: accountId, status: 'failed', error: 'Không thể hoàn tất đồng bộ tin nhắn Telegram' });
+                }).catch(err => {
+                    Logger_1.default.warn(`[TelegramUserListener] Follow-up recovery failed: ${err.message}`);
+                });
+            }, 1000);
+        }
+    }
+}
+/**
+ * Fetch avatar cho tất cả contacts trong dialogs
+ */
+async function fetchContactAvatars(accountId, client, dialogs) {
+    const db = DatabaseService_1.default.getInstance();
+    if (!db)
+        return;
+    for (const dialog of dialogs) {
+        const chatId = getCanonicalChatId(dialog.id);
+        if (!chatId)
+            continue;
+        try {
+            // Kiểm tra đã có avatar chưa
+            const existing = db.queryOne(`SELECT avatar_url FROM contacts WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, [accountId, chatId]);
+            if (existing?.avatar_url)
+                continue; // Đã có avatar
+            // Lấy thông tin entity từ dialog
+            const entity = dialog.entity;
+            if (!entity)
+                continue;
+            let avatarUrl = '';
+            // Try download avatar photo
+            try {
+                const photo = await downloadProfilePhotoQueued(accountId, client, entity, `chat:${chatId}`, false);
+                if (photo && photo.length > 0) {
+                    // Lưu avatar vào file và lấy URL
+                    const avatarPath = `telegram_avatar_${chatId}_${Date.now()}.jpg`;
+                    const savedPath = await saveAvatarToDisk(Buffer.from(photo), avatarPath);
+                    if (savedPath) {
+                        const normalized = savedPath.replace(/\\/g, '/');
+                        avatarUrl = 'local-media://' + (normalized.startsWith('/') ? normalized : '/' + normalized);
+                    }
+                }
+            }
+            catch { }
+            if (avatarUrl) {
+                db.run(`
+          UPDATE contacts SET avatar_url = ?
+          WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'
+        `, [avatarUrl, accountId, chatId]);
+            }
+        }
+        catch (err) {
+            // Silent fail cho avatar
+        }
+    }
+    // Broadcast để UI refresh avatars
+    EventBroadcaster_1.default.emit('db:unreadChanged', { zaloId: accountId });
+}
+/**
+ * Lưu avatar buffer vào disk — dùng cùng base dir với FileStorageService
+ */
+async function saveAvatarToDisk(buffer, filename) {
+    try {
+        const baseDir = FileStorageService_1.default.getBaseDir();
+        const avatarsDir = path.join(baseDir, '_avatars', 'telegram');
+        if (!fs.existsSync(avatarsDir)) {
+            fs.mkdirSync(avatarsDir, { recursive: true });
+        }
+        const filePath = path.join(avatarsDir, filename);
+        fs.writeFileSync(filePath, buffer);
+        return filePath;
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * Re-download avatar for a specific Telegram contact (user/group/channel).
+ */
+async function refreshContactAvatar(accountId, chatId) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const entity = await resolvePeerEntity(accountId, conn.client, chatId);
+        if (!entity)
+            return { success: false, error: 'Entity not found' };
+        const photo = await downloadProfilePhotoQueued(accountId, conn.client, entity, `refresh:${chatId}`, false);
+        if (!photo || photo.length === 0)
+            return { success: false, error: 'No photo available' };
+        const avatarPath = `telegram_avatar_${chatId}_${Date.now()}.jpg`;
+        const savedPath = await saveAvatarToDisk(Buffer.from(photo), avatarPath);
+        if (!savedPath)
+            return { success: false, error: 'Failed to save avatar' };
+        const normalized = savedPath.replace(/\\/g, '/');
+        const avatarUrl = 'local-media://' + (normalized.startsWith('/') ? normalized : '/' + normalized);
+        const db = DatabaseService_1.default.getInstance();
+        db?.run(`UPDATE contacts SET avatar_url = ? WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, [avatarUrl, accountId, chatId]);
+        (0, avatarFetchCache_1.resetAvatarCache)(accountId, chatId);
+        EventBroadcaster_1.default.emit('db:unreadChanged', { zaloId: accountId, source: 'telegram_avatar_refresh' });
+        return { success: true, avatarUrl };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/** Cache for bot commands: `${accountId}_${botId}` → { commands, fetchedAt } */
+const botCommandsCache = new Map();
+const BOT_COMMANDS_CACHE_TTL = 60 * 60 * 1000; // 1 hour
+/**
+ * Fetch bot commands via users.getFullUser → UserFull.botInfo.commands.
+ * Any user account can call this — no bot owner credentials needed.
+ */
+async function getBotCommands(accountId, botId) {
+    const cacheKey = `${accountId}_${botId}`;
+    const cached = botCommandsCache.get(cacheKey);
+    if (cached && Date.now() - cached.fetchedAt < BOT_COMMANDS_CACHE_TTL) {
+        return { success: true, commands: cached.commands };
+    }
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const entity = await resolvePeerEntity(accountId, conn.client, botId);
+        if (!entity)
+            return { success: false, error: 'Bot not found' };
+        // Build InputUser from entity (avoids resolveInputUser which fails for large IDs)
+        const accessHash = entity.accessHash;
+        if (!accessHash)
+            return { success: false, error: 'Cannot get bot access hash' };
+        const inputUser = new Api.InputUser({ userId: BigInt(String(botId)), accessHash: BigInt(String(accessHash)) });
+        const full = await conn.client.invoke(new Api.users.GetFullUser({ id: inputUser }));
+        // Extract botInfo from UserFull
+        const botInfo = full?.fullUser?.botInfo;
+        if (!botInfo)
+            return { success: true, commands: [] }; // Not a bot or no commands
+        const commands = (botInfo.commands || []).map((cmd) => ({
+            command: cmd.command || '',
+            description: cmd.description || '',
+        }));
+        botCommandsCache.set(cacheKey, { commands, fetchedAt: Date.now() });
+        return { success: true, commands };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+// ─── Telegram WebView (Mini App) ─────────────────────────────────────────────
+/**
+ * Open a Mini App via messages.requestWebView.
+ * Used for: inline keyboard WebView buttons, custom bot menu buttons.
+ */
+async function requestWebView(accountId, botId, url, fromBotMenu = false) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const entity = await resolvePeerEntity(accountId, conn.client, botId);
+        if (!entity)
+            return { success: false, error: 'Bot not found' };
+        const accessHash = entity.accessHash;
+        if (!accessHash)
+            return { success: false, error: 'Cannot get bot access hash' };
+        const peer = await resolveInputPeer(accountId, conn.client, botId);
+        const bot = new Api.InputUser({ userId: BigInt(String(botId)), accessHash: BigInt(String(accessHash)) });
+        const result = await conn.client.invoke(new Api.messages.RequestWebView({
+            peer,
+            bot,
+            url: url || undefined,
+            platform: 'desktop',
+            ...(fromBotMenu ? { fromBotMenu: true } : {}),
+        }));
+        return {
+            success: true,
+            webViewUrl: result?.url || '',
+            queryId: String(result?.queryId || ''),
+        };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Open a bot's Main Mini App via messages.requestMainWebView.
+ * Used for: "Open" button in conversation list for bots with Main Mini App.
+ */
+async function requestMainWebView(accountId, botId, startParam) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const entity = await resolvePeerEntity(accountId, conn.client, botId);
+        if (!entity)
+            return { success: false, error: 'Bot not found' };
+        const accessHash = entity.accessHash;
+        if (!accessHash)
+            return { success: false, error: 'Cannot get bot access hash' };
+        const peer = await resolveInputPeer(accountId, conn.client, botId);
+        const bot = new Api.InputUser({ userId: BigInt(String(botId)), accessHash: BigInt(String(accessHash)) });
+        const result = await conn.client.invoke(new Api.messages.RequestMainWebView({
+            peer,
+            bot,
+            platform: 'desktop',
+            ...(startParam ? { startParam } : {}),
+        }));
+        return {
+            success: true,
+            webViewUrl: result?.url || '',
+            queryId: String(result?.queryId || ''),
+        };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Keep WebView alive. Must be called every ~60s while WebView is open.
+ */
+async function prolongWebView(accountId, botId, queryId) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const entity = await resolvePeerEntity(accountId, conn.client, botId);
+        if (!entity)
+            return { success: false, error: 'Bot not found' };
+        const accessHash = entity.accessHash;
+        if (!accessHash)
+            return { success: false, error: 'Cannot get bot access hash' };
+        const peer = await resolveInputPeer(accountId, conn.client, botId);
+        const bot = new Api.InputUser({ userId: BigInt(String(botId)), accessHash: BigInt(String(accessHash)) });
+        await conn.client.invoke(new Api.messages.ProlongWebView({
+            peer,
+            bot,
+            queryId: BigInt(queryId),
+        }));
+        return { success: true };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+// ─── Rate Limiting ───────────────────────────────────────────────────────────
+/** Rate limiter: 30 tin/phút per account, refill dần (1 token mỗi 2 giây) */
+const rateLimiters = new Map();
+const RATE_LIMIT_MAX_TOKENS = 30;
+const RATE_LIMIT_REFILL_INTERVAL_MS = 2000; // 1 token mỗi 2 giây
+function checkRateLimit(accountId) {
+    let limiter = rateLimiters.get(accountId);
+    if (!limiter) {
+        limiter = { tokens: RATE_LIMIT_MAX_TOKENS, lastRefill: Date.now() };
+        rateLimiters.set(accountId, limiter);
+    }
+    // Refill tokens dần dần
+    const now = Date.now();
+    const elapsed = now - limiter.lastRefill;
+    const tokensToAdd = Math.floor(elapsed / RATE_LIMIT_REFILL_INTERVAL_MS);
+    if (tokensToAdd > 0) {
+        limiter.tokens = Math.min(RATE_LIMIT_MAX_TOKENS, limiter.tokens + tokensToAdd);
+        limiter.lastRefill += tokensToAdd * RATE_LIMIT_REFILL_INTERVAL_MS; // Fix: don't drift the clock
+    }
+    if (limiter.tokens <= 0) {
+        // Tính thời gian chờ cho token tiếp theo
+        const waitMs = RATE_LIMIT_REFILL_INTERVAL_MS - (now - limiter.lastRefill);
+        const waitSeconds = Math.ceil(waitMs / 1000);
+        return { allowed: false, waitSeconds };
+    }
+    limiter.tokens--;
+    return { allowed: true };
+}
+/** Resolve a usable InputPeer from GramJS's entity cache first, then the
+ * durable peer registry. A bare Telegram user ID is not sufficient to send
+ * messages because MTProto requires its access hash. */
+async function resolveInputPeer(accountId, client, peerId) {
+    try {
+        return await client.getInputEntity(peerId);
+    }
+    catch (cacheError) {
+        const cached = DatabaseService_1.default.getInstance()?.getTelegramPeer(accountId, peerId);
+        if (!cached) {
+            throw new Error(`Không tìm thấy Telegram peer ${peerId}. Hãy mở hội thoại hoặc tìm username trước.`);
+        }
+        const { Api } = require('telegram');
+        const peerType = String(cached.peer_type || 'user');
+        const accessHash = String(cached.access_hash || '');
+        const rawId = peerType === 'channel' || peerType === 'supergroup' || peerType === 'forum'
+            ? String(peerId).replace(/^-100/, '')
+            : String(peerId).replace(/^-/, '');
+        if (peerType === 'basic_group') {
+            return new Api.InputPeerChat({ chatId: BigInt(rawId) });
+        }
+        if (!accessHash) {
+            throw new Error(`Telegram peer ${peerId} chưa có access hash hợp lệ.`);
+        }
+        if (peerType === 'channel' || peerType === 'supergroup' || peerType === 'forum') {
+            return new Api.InputPeerChannel({ channelId: BigInt(rawId), accessHash: BigInt(accessHash) });
+        }
+        return new Api.InputPeerUser({ userId: BigInt(rawId), accessHash: BigInt(accessHash) });
+    }
+}
+/** Resolve a peer's full entity when it is still available, while refreshing
+ * the durable registry. Callers must tolerate an unavailable entity: after an
+ * app restart GramJS's in-memory entity cache is empty by design. */
+async function resolvePeerEntity(accountId, client, peerId) {
+    const cached = DatabaseService_1.default.getInstance()?.getTelegramPeer(accountId, peerId);
+    if (cached) {
+        try {
+            const { Api } = require('telegram');
+            const peerType = String(cached.peer_type || 'user');
+            const rawId = peerType === 'channel' || peerType === 'supergroup' || peerType === 'forum'
+                ? String(peerId).replace(/^-100/, '')
+                : String(peerId).replace(/^-/, '');
+            const accessHash = String(cached.access_hash || '');
+            const inputPeer = peerType === 'basic_group'
+                ? new Api.InputPeerChat({ chatId: BigInt(rawId) })
+                : isChannelPeerType(peerType) && accessHash
+                    ? new Api.InputPeerChannel({ channelId: BigInt(rawId), accessHash: BigInt(accessHash) })
+                    : accessHash
+                        ? new Api.InputPeerUser({ userId: BigInt(rawId), accessHash: BigInt(accessHash) })
+                        : null;
+            if (inputPeer) {
+                const entity = await client.getEntity(inputPeer);
+                cacheTelegramPeer(accountId, peerId, entity);
+                return entity;
+            }
+        }
+        catch {
+            // A stale durable access hash is not repaired by retrying a bare marked
+            // ID; that would issue channels.GetChannels with no usable hash and
+            // produce the noisy CHANNEL_INVALID stack seen at startup.
+            return null;
+        }
+    }
+    try {
+        const entity = await client.getEntity(peerId);
+        cacheTelegramPeer(accountId, peerId, entity);
+        return entity;
+    }
+    catch {
+        return null;
+    }
+}
+async function hydrateTelegramIdentity(accountId, client, userId, chatId, entityHint) {
+    if (!userId)
+        return null;
+    const key = `${accountId}:${chatId || '-'}:${userId}`;
+    const existing = entityHydrationQueues.get(key);
+    if (existing)
+        return existing;
+    let task;
+    task = (async () => {
+        const entity = entityHint || await resolvePeerEntity(accountId, client, userId);
+        if (!entity)
+            return null;
+        cacheTelegramPeer(accountId, userId, entity);
+        // Update is_cov_bot flag for bot users
+        if (entity.className === 'User' && entity.bot) {
+            const db = DatabaseService_1.default.getInstance();
+            db?.run(`UPDATE contacts SET is_cov_bot = 1 WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, [accountId, userId]);
+        }
+        const displayName = [entity.firstName, entity.lastName].filter(Boolean).join(' ')
+            || entity.title || entity.username || userId;
+        let cachedAvatar = '';
+        if (chatId && chatId !== userId) {
+            const db = DatabaseService_1.default.getInstance();
+            const cached = db?.queryOne(`SELECT avatar, role FROM page_group_member
+         WHERE owner_zalo_id = ? AND group_id = ? AND member_id = ?`, [accountId, chatId, userId]);
+            cachedAvatar = cached?.avatar || '';
+            db?.upsertGroupMember(accountId, chatId, {
+                memberId: userId,
+                displayName,
+                avatar: cachedAvatar,
+                role: Number(cached?.role || 0),
+                username: entity.username || '',
+            });
+            if (entity.className === 'User' && entity.photo && entity.photo !== 'ChatPhotoEmpty' && !cached?.avatar) {
+                scheduleGroupMemberAvatarHydration(accountId, chatId, client, [entity], new Map(), new Map([[userId, Number(cached?.role || 0)]]));
+            }
+        }
+        EventBroadcaster_1.default.emit('event:telegramEntityHydrated', {
+            zaloId: accountId,
+            threadId: chatId,
+            userId,
+            displayName,
+            username: entity.username || '',
+            avatar: cachedAvatar,
+            ...getTelegramUserStatus(entity),
+        });
+        return entity;
+    })().finally(() => {
+        if (entityHydrationQueues.get(key) === task)
+            entityHydrationQueues.delete(key);
+    });
+    entityHydrationQueues.set(key, task);
+    return task;
+}
+/** A typing update only carries a peer ID. Give the identity request a short
+ * head start before publishing the indicator so a cold member cache does not
+ * render a numeric Telegram ID. Hydration still completes in the background
+ * and emits its cache-update event if Telegram takes longer than this bound. */
+async function hydrateTelegramTypingIdentity(accountId, client, userId, chatId) {
+    const hydration = hydrateTelegramIdentity(accountId, client, userId, chatId).catch(() => null);
+    let timeoutId;
+    try {
+        await Promise.race([
+            hydration,
+            new Promise((resolve) => {
+                timeoutId = setTimeout(resolve, 350);
+            }),
+        ]);
+    }
+    finally {
+        if (timeoutId)
+            clearTimeout(timeoutId);
+    }
+}
+function isChannelPeerType(peerType) {
+    return peerType === 'channel' || peerType === 'supergroup' || peerType === 'forum';
+}
+/** Determine chat type without treating a failed entity-cache lookup as a
+ * different Telegram chat type. */
+async function resolveChatPeerType(accountId, client, chatId) {
+    const entity = await resolvePeerEntity(accountId, client, chatId);
+    if (entity)
+        return getTelegramPeerType(entity);
+    const cached = DatabaseService_1.default.getInstance()?.getTelegramPeer(accountId, chatId);
+    if (cached?.peer_type)
+        return cached.peer_type;
+    throw new Error(`KhÃ´ng tÃ¬m tháº¥y Telegram chat ${chatId}. HÃ£y táº£i láº¡i danh sÃ¡ch há»™i thoáº¡i.`);
+}
+/** Channel RPCs require InputChannel (not InputPeerChannel). Build it from
+ * the live entity when possible, otherwise from the persisted access hash. */
+async function resolveInputChannel(accountId, client, chatId) {
+    const { Api } = require('telegram');
+    // 1. Try GramJS's getInputEntity — uses session cache + entity cache + API fallback.
+    //    This is the most reliable way to get a fresh InputChannel.
+    try {
+        const inputEntity = await client.getInputEntity(chatId);
+        if (inputEntity)
+            return inputEntity;
+    }
+    catch {
+        // getInputEntity failed — fall through to manual resolution
+    }
+    // 2. Try getEntity to fetch a fresh entity with access hash
+    const entity = await resolvePeerEntity(accountId, client, chatId);
+    const liveAccessHash = entity?.accessHash;
+    if (entity?.className === 'Channel' && liveAccessHash != null) {
+        return new Api.InputChannel({ channelId: BigInt(entity.id), accessHash: BigInt(liveAccessHash) });
+    }
+    // 3. Fall back to DB-persisted peer (may have stale access hash)
+    const cached = DatabaseService_1.default.getInstance()?.getTelegramPeer(accountId, chatId);
+    if (!isChannelPeerType(cached?.peer_type)) {
+        throw new Error(`Telegram peer ${chatId} không phải supergroup/channel.`);
+    }
+    const accessHash = String(cached?.access_hash || '');
+    if (!accessHash) {
+        throw new Error(`Telegram channel ${chatId} chưa có access hash hợp lệ.`);
+    }
+    return new Api.InputChannel({
+        channelId: BigInt(String(chatId).replace(/^-100/, '').replace(/^-/, '')),
+        accessHash: BigInt(accessHash),
+    });
+}
+/** Participant-management RPCs require InputUser. */
+async function resolveInputUser(accountId, client, userId) {
+    const { Api } = require('telegram');
+    const entity = await resolvePeerEntity(accountId, client, userId);
+    if (entity?.className === 'User' && entity.accessHash != null) {
+        return new Api.InputUser({ userId: BigInt(entity.id), accessHash: BigInt(entity.accessHash) });
+    }
+    const cached = DatabaseService_1.default.getInstance()?.getTelegramPeer(accountId, userId);
+    if (cached?.peer_type && cached.peer_type !== 'user') {
+        throw new Error(`Telegram peer ${userId} khÃ´ng pháº£i ngÆ°á»i dÃ¹ng.`);
+    }
+    const accessHash = String(cached?.access_hash || '');
+    if (!accessHash) {
+        throw new Error(`Telegram user ${userId} chÆ°a cÃ³ access hash há»£p lá»‡.`);
+    }
+    return new Api.InputUser({
+        userId: BigInt(String(userId).replace(/^-/, '')),
+        accessHash: BigInt(accessHash),
+    });
+}
+// ─── Send Message ────────────────────────────────────────────────────────────
+function getPersistedTelegramSendDenial(accountId, chatId) {
+    try {
+        const state = DatabaseService_1.default.getInstance()?.queryOne(`SELECT telegram_can_send, telegram_send_reason, telegram_state_updated_at FROM contacts
+       WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, [accountId, chatId]);
+        if (state?.telegram_can_send !== 0)
+            return null;
+        // Stale denial: if the denial is older than 5 minutes, allow retry
+        // This prevents temporary connection issues from permanently blocking sends
+        const updatedAt = Number(state.telegram_state_updated_at || 0);
+        if (updatedAt > 0 && (Date.now() - updatedAt) > 5 * 60 * 1000) {
+            Logger_1.default.log(`[TelegramUserListener] Stale send denial for ${chatId}, allowing retry`);
+            return null;
+        }
+        return state.telegram_send_reason || 'Bạn không có quyền gửi tin nhắn trong cuộc trò chuyện này';
+    }
+    catch {
+        return null;
+    }
+}
+async function sendMessage(accountId, chatId, text, mentions, replyToMsgId) {
+    const listener = activeListeners.get(accountId);
+    if (!listener?.client || !listener.connected) {
+        return { success: false, error: 'Telegram client not connected' };
+    }
+    const denial = getPersistedTelegramSendDenial(accountId, chatId);
+    if (denial)
+        return { success: false, error: denial };
+    // Rate limit check
+    const rateLimit = checkRateLimit(accountId);
+    if (!rateLimit.allowed) {
+        return { success: false, error: `Gửi tin quá nhanh. Vui lòng chờ ${rateLimit.waitSeconds} giây.` };
+    }
+    try {
+        const { Api } = require('telegram');
+        const peer = await resolveInputPeer(accountId, listener.client, chatId);
+        // Build mention entities từ mentions array
+        const entities = [];
+        if (mentions && mentions.length > 0) {
+            for (const m of mentions) {
+                if (!m.uid)
+                    continue;
+                try {
+                    const entity = await resolveInputPeer(accountId, listener.client, m.uid);
+                    if (entity) {
+                        entities.push(new Api.InputMessageEntityMentionName({
+                            offset: m.pos,
+                            length: m.len,
+                            userId: entity,
+                        }));
+                    }
+                }
+                catch { }
+            }
+        }
+        const sendOpts = { message: text };
+        if (entities.length > 0)
+            sendOpts.entities = entities;
+        if (replyToMsgId)
+            sendOpts.replyTo = Number(replyToMsgId);
+        const result = await listener.client.sendMessage(peer, sendOpts);
+        const msgId = String(result?.id || Date.now());
+        // Save sent message to DB (INSERT OR IGNORE — socket echo sẽ skip nếu đã tồn tại)
+        const now = Date.now();
+        const threadType = chatId.startsWith('-') ? 1 : 0;
+        // Build quote_data nếu reply
+        let quoteData = null;
+        if (replyToMsgId) {
+            const dbQuote = DatabaseService_1.default.getInstance()?.queryOne(`SELECT content, msg_type, sender_id FROM messages WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [replyToMsgId, accountId, chatId]);
+            if (dbQuote) {
+                quoteData = JSON.stringify({ msgId: replyToMsgId, msg: dbQuote.content || '', senderId: dbQuote.sender_id || '', msgType: dbQuote.msg_type || 'text' });
+            }
+            else {
+                quoteData = JSON.stringify({ msgId: replyToMsgId, msg: '', senderId: '', msgType: 'text' });
+            }
+        }
+        const mentionAttachments = (mentions || [])
+            .map((mention) => ({
+            type: 'telegram_mention',
+            offset: Math.max(0, Number(mention.pos || 0)),
+            length: Math.max(0, Number(mention.len || 0)),
+            user_id: String(mention.uid || ''),
+        }))
+            .filter((mention) => mention.user_id && mention.length > 0 && mention.offset + mention.length <= text.length);
+        const db = DatabaseService_1.default.getInstance();
+        if (db) {
+            db.run(`
+        INSERT OR IGNORE INTO messages
+          (msg_id, owner_zalo_id, thread_id, thread_type, sender_id, content, msg_type, timestamp, is_sent, attachments, status, channel, reply_to_id, quote_data)
+        VALUES (?, ?, ?, ?, ?, ?, 'text', ?, 1, ?, 'sent', 'telegram_user', ?, ?)
+      `, [msgId, accountId, chatId, threadType, accountId, text, now, JSON.stringify(mentionAttachments), replyToMsgId || null, quoteData]);
+            // Update contacts (last_message, last_message_time) — đảm bảo conversation list cập nhật ngay
+            db.run(`
+        INSERT INTO contacts (owner_zalo_id, contact_id, display_name, avatar_url, is_friend, contact_type, unread_count, last_message, last_message_time, channel, is_in_others)
+        VALUES (?, ?, '', '', 0, ?, 0, ?, ?, 'telegram_user', 0)
+        ON CONFLICT(owner_zalo_id, contact_id) DO UPDATE SET
+          last_message = CASE WHEN excluded.last_message_time >= COALESCE(contacts.last_message_time, 0) THEN excluded.last_message ELSE contacts.last_message END,
+          last_message_time = CASE WHEN excluded.last_message_time >= COALESCE(contacts.last_message_time, 0) THEN excluded.last_message_time ELSE contacts.last_message_time END
+      `, [accountId, chatId, threadType === 1 ? 'group' : 'user', text, now]);
+        }
+        // Emit event cho renderer — socket echo sẽ skip do persistTelegramMessage trả 'existing'
+        EventBroadcaster_1.default.emit('event:message', {
+            zaloId: accountId,
+            channel: 'telegram_user',
+            message: {
+                channel: 'telegram_user',
+                type: threadType,
+                threadId: chatId,
+                isSelf: true,
+                _silentNotification: true,
+                data: {
+                    uidFrom: accountId,
+                    idTo: chatId,
+                    msgId,
+                    content: text,
+                    preview: text,
+                    msgType: 'text',
+                    channel: 'telegram_user',
+                    ts: String(now),
+                    replyToId: replyToMsgId || undefined,
+                    quoteData: quoteData || undefined,
+                    attachments: mentionAttachments,
+                },
+            },
+        });
+        return { success: true, messageId: msgId };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Edit message (User API)
+ */
+async function editMessage(accountId, chatId, messageId, text) {
+    const listener = activeListeners.get(accountId);
+    if (!listener?.client || !listener.connected)
+        return { success: false, error: 'Not connected' };
+    try {
+        const peer = await resolveInputPeer(accountId, listener.client, chatId);
+        await listener.client.editMessage(peer, { message: Number(messageId), text });
+        // Update DB
+        const db = DatabaseService_1.default.getInstance();
+        if (db) {
+            db.run(`UPDATE messages SET content = ? WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [text, messageId, accountId, chatId]);
+        }
+        return { success: true };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Pin message (User API) — uses messages.UpdatePinnedMessage
+ */
+async function syncPinnedMessages(accountId, chatId) {
+    const listener = activeListeners.get(accountId);
+    if (!listener?.client || !listener.connected)
+        return { success: false, error: 'Not connected' };
+    try {
+        const { Api } = await Promise.resolve().then(() => __importStar(require('telegram')));
+        const peer = await resolveInputPeer(accountId, listener.client, chatId);
+        const db = DatabaseService_1.default.getInstance();
+        const entities = new Map();
+        const pinnedMessages = [];
+        const seenMessageIds = new Set();
+        let offsetId = 0;
+        // messages.search pages at 100 messages, but Telegram supports multiple
+        // pinned messages and does not impose Zalo's three-message rule. Retrieve
+        // every page so the local snapshot never truncates pins after the first 100.
+        while (true) {
+            const result = await listener.client.invoke(new Api.messages.Search({
+                peer, q: '', filter: new Api.InputMessagesFilterPinned(), minDate: 0, maxDate: 0,
+                offsetId, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: BigInt(0),
+            }));
+            for (const entity of [...(result?.users || []), ...(result?.chats || [])]) {
+                const entityId = getCanonicalChatId(entity);
+                if (!entityId)
+                    continue;
+                entities.set(entityId, entity);
+                cacheTelegramPeer(accountId, entityId, entity);
+            }
+            const page = (result?.messages || []).filter((item) => item?.className === 'Message');
+            if (page.length === 0)
+                break;
+            for (const message of page) {
+                const messageId = String(message.id || '');
+                if (messageId && !seenMessageIds.has(messageId)) {
+                    seenMessageIds.add(messageId);
+                    pinnedMessages.push(message);
+                }
+            }
+            if (page.length < 100)
+                break;
+            const nextOffsetId = Number(page[page.length - 1]?.id || 0);
+            if (!nextOffsetId || nextOffsetId === offsetId)
+                break;
+            offsetId = nextOffsetId;
+        }
+        const peerType = db?.getTelegramPeer(accountId, chatId)?.peer_type;
+        const chatEntity = entities.get(chatId);
+        const chatDisplayName = chatEntity?.title
+            || db?.getTelegramPeer(accountId, chatId)?.display_name
+            || db?.queryOne(`SELECT display_name FROM contacts WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, [accountId, chatId])?.display_name
+            || 'Kênh/Nhóm Telegram';
+        const pins = [];
+        for (const message of pinnedMessages) {
+            const normalized = normalizeTelegramMessageMedia(message, peerType);
+            const senderId = getCanonicalChatId(message.fromId)
+                || String(message.senderId?.valueOf?.() || '');
+            const sender = entities.get(senderId);
+            const senderName = sender
+                ? [sender.firstName, sender.lastName].filter(Boolean).join(' ') || sender.title || sender.username || chatDisplayName
+                : senderId === chatId ? chatDisplayName : 'Thành viên Telegram';
+            if (sender?.className === 'User') {
+                await hydrateTelegramIdentity(accountId, listener.client, senderId, chatId, sender);
+            }
+            if (db) {
+                persistTelegramMessage(db, {
+                    msgId: String(message.id), accountId, chatId,
+                    threadType: chatId.startsWith('-') ? 1 : 0,
+                    senderId: senderId || chatId,
+                    content: normalized.content,
+                    msgType: normalized.msgType,
+                    timestamp: Number(message.date || 0) * 1000,
+                    isSelf: !!message.out,
+                    attachments: normalized.attachments,
+                    replyToId: getTelegramReplyToMessageId(message),
+                    topicId: getForumTopicId(message),
+                    reactions: normalizeTelegramReactions(message.reactions, accountId),
+                });
+            }
+            const stored = db?.queryOne(`SELECT local_paths FROM messages
+           WHERE owner_zalo_id = ? AND thread_id = ? AND msg_id = ? AND channel = 'telegram_user'`, [accountId, chatId, String(message.id)]);
+            let previewImage = '';
+            try {
+                const paths = JSON.parse(stored?.local_paths || '{}');
+                previewImage = paths.main || paths.file || paths.image || paths.thumbnail || paths.video || '';
+            }
+            catch { }
+            pins.push({
+                msgId: String(message.id), msgType: normalized.msgType,
+                content: normalized.content, previewText: normalized.content, previewImage,
+                senderId, senderName, timestamp: Number(message.date || 0) * 1000,
+                // Telegram's pinned search returns messages in an API-dependent
+                // order and does not expose the moment they were pinned. Persist the
+                // message time so the UI consistently shows newest message first.
+                pinnedAt: Number(message.date || 0) * 1000,
+            });
+        }
+        db?.replaceRemotePinnedMessages(accountId, chatId, pins);
+        EventBroadcaster_1.default.emit('event:pinsUpdated', { zaloId: accountId, threadId: chatId });
+        return { success: true, pins: db?.getPinnedMessages(accountId, chatId) || [] };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/** Ensure a pinned/search target exists in the local timeline. Telegram message
+ * IDs are scoped to the peer, so both lookup and persistence include chatId.
+ * Missing media is downloaded before returning so the opened target is not a
+ * permanent placeholder. This path deliberately has no unread/contact/new
+ * message side effects. */
+async function ensureMessageAvailable(accountId, chatId, messageId) {
+    const db = DatabaseService_1.default.getInstance();
+    const numericMessageId = Number(messageId);
+    if (!db || !accountId || !chatId || !Number.isSafeInteger(numericMessageId) || numericMessageId <= 0) {
+        return { success: false, error: 'Invalid Telegram message identity' };
+    }
+    const existing = db.getMessageById(accountId, messageId, chatId);
+    let existingLocalPaths = {};
+    try {
+        existingLocalPaths = JSON.parse(existing?.local_paths || '{}');
+    }
+    catch { }
+    const existingNeedsMedia = !!existing && ['photo', 'video', 'audio', 'file', 'sticker'].includes(String(existing.msg_type || ''));
+    if (existing && (!existingNeedsMedia || Object.values(existingLocalPaths).some(Boolean))) {
+        return { success: true, message: existing };
+    }
+    const listener = activeListeners.get(accountId);
+    if (!listener?.client || !listener.connected) {
+        return existing
+            ? { success: true, message: existing }
+            : { success: false, error: 'Telegram listener is not connected' };
+    }
+    try {
+        const peer = await resolveInputPeer(accountId, listener.client, chatId);
+        const fetched = await listener.client.getMessages(peer, { ids: [numericMessageId] });
+        const message = (fetched || []).find((item) => String(item?.id || '') === messageId && item?.className !== 'MessageEmpty');
+        if (!message) {
+            tgLog('warn', accountId, 'history', 'PIN_TARGET_NOT_FOUND', { chatId, messageId });
+            return { success: false, error: 'Telegram message was not found' };
+        }
+        const peerType = db.getTelegramPeer(accountId, chatId)?.peer_type;
+        const normalized = normalizeTelegramMessageMedia(message, peerType);
+        const senderId = getCanonicalChatId(message.fromId)
+            || String(message.senderId?.valueOf?.() || '')
+            || chatId;
+        const persisted = persistTelegramMessage(db, {
+            msgId: messageId, accountId, chatId,
+            threadType: chatId.startsWith('-') ? 1 : 0,
+            senderId,
+            content: normalized.content,
+            msgType: normalized.msgType,
+            timestamp: Number(message.date || 0) * 1000,
+            isSelf: !!message.out,
+            attachments: normalized.attachments,
+            replyToId: getTelegramReplyToMessageId(message),
+            topicId: getForumTopicId(message),
+        });
+        if (persisted.status === 'failed')
+            return { success: false, error: 'Could not persist Telegram message' };
+        try {
+            const sender = await message.getSender?.();
+            if (sender?.className === 'User') {
+                await hydrateTelegramIdentity(accountId, listener.client, senderId, chatId, sender);
+            }
+        }
+        catch { }
+        const hasMedia = !!message.media
+            && String(message.media?.className || '') !== 'MessageMediaEmpty';
+        if (hasMedia && !Object.values(existingLocalPaths).some(Boolean)) {
+            await downloadMediaForMessage(accountId, listener.client, message, messageId, normalized.msgType, chatId);
+        }
+        const stored = db.getMessageById(accountId, messageId, chatId);
+        tgLog('info', accountId, 'history', 'PIN_TARGET_FETCHED', {
+            chatId, messageId, result: persisted.status, msgType: normalized.msgType,
+        });
+        return { success: true, message: stored || existing };
+    }
+    catch (err) {
+        tgLog('warn', accountId, 'history', 'PIN_TARGET_FAILED', {
+            chatId, messageId, error: err?.message || String(err),
+        });
+        return { success: false, error: err?.message || String(err) };
+    }
+}
+async function pinMessage(accountId, chatId, messageId, silent, unpin) {
+    const listener = activeListeners.get(accountId);
+    if (!listener?.client || !listener.connected)
+        return { success: false, error: 'Not connected' };
+    try {
+        const peer = await resolveInputPeer(accountId, listener.client, chatId);
+        await listener.client.invoke(new (await Promise.resolve().then(() => __importStar(require('telegram')))).Api.messages.UpdatePinnedMessage({
+            peer,
+            id: Number(messageId),
+            silent: silent ?? true,
+            unpin: unpin || undefined,
+        }));
+        await syncPinnedMessages(accountId, chatId);
+        return { success: true };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Delete message (User API)
+ */
+async function deleteMessages(accountId, chatId, messageIds) {
+    const listener = activeListeners.get(accountId);
+    if (!listener?.client || !listener.connected)
+        return { success: false, error: 'Not connected' };
+    try {
+        const peer = await resolveInputPeer(accountId, listener.client, chatId);
+        await listener.client.deleteMessages(peer, messageIds.map(Number), { revoke: true });
+        // Update DB
+        const db = DatabaseService_1.default.getInstance();
+        if (db) {
+            for (const msgId of messageIds) {
+                db.run(`UPDATE messages SET msg_type = 'deleted' WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [msgId, accountId, chatId]);
+            }
+        }
+        return { success: true };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Get messages from a chat (User API).
+ * Returns normalized messages compatible with the renderer message model.
+ */
+async function getMessages(accountId, chatId, opts) {
+    const listener = activeListeners.get(accountId);
+    if (!listener?.client || !listener.connected)
+        return { success: false, error: 'Not connected' };
+    try {
+        const peer = await resolveInputPeer(accountId, listener.client, chatId);
+        // The header accepts up to 5,000. Do not pass that large limit through
+        // GramJS's iterator: it has a first-page negative timeout bug and bursts
+        // requests into Telegram. Fetch bounded pages ourselves instead.
+        const requestedLimit = Number(opts?.limit);
+        const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 50, 1), MAX_MANUAL_MESSAGE_DOWNLOAD);
+        const rawMessages = [];
+        const PAGE_SIZE = 100;
+        const PAGE_DELAY_MS = 1000;
+        let offsetId = Number(opts?.offsetId || 0);
+        while (rawMessages.length < limit) {
+            const pageLimit = Math.min(PAGE_SIZE, limit - rawMessages.length);
+            const fetchOpts = { limit: pageLimit, offsetId };
+            // For forum topics, use replyToMsgId filter.
+            if (opts?.topicRootMessageId)
+                fetchOpts.replyTo = Number(opts.topicRootMessageId);
+            const page = await listener.client.getMessages(peer, fetchOpts);
+            if (!page.length)
+                break;
+            rawMessages.push(...page);
+            const oldestId = Math.min(...page.map((message) => Number(message?.id || 0)).filter(Boolean));
+            if (!Number.isFinite(oldestId) || (offsetId > 0 && oldestId >= offsetId) || page.length < pageLimit)
+                break;
+            offsetId = oldestId;
+            if (rawMessages.length < limit) {
+                await new Promise(resolve => setTimeout(resolve, PAGE_DELAY_MS));
+            }
+        }
+        const db = DatabaseService_1.default.getInstance();
+        const messages = [];
+        let scheduledMediaDownloads = 0;
+        const rawMessageById = new Map();
+        for (const rawMessage of rawMessages || []) {
+            if (rawMessage?.id != null)
+                rawMessageById.set(String(rawMessage.id), rawMessage);
+        }
+        for (const msg of rawMessages || []) {
+            if (!msg)
+                continue;
+            const msgId = String(msg.id);
+            const senderId = String(msg.senderId?.valueOf() || '');
+            const isSelf = msg.out || false;
+            const timestamp = (msg.date || Math.floor(Date.now() / 1000)) * 1000;
+            const cachedPeerType = db?.getTelegramPeer(accountId, chatId)?.peer_type;
+            const { content, msgType, attachments } = normalizeTelegramMessageMedia(msg, cachedPeerType);
+            const reactions = normalizeTelegramReactions(msg.reactions, accountId);
+            // Reply detection
+            const replyToId = getTelegramReplyToMessageId(msg);
+            const topicId = getForumTopicId(msg);
+            let quoteData;
+            if (replyToId) {
+                const rawOriginal = rawMessageById.get(replyToId);
+                if (rawOriginal) {
+                    const originalMedia = normalizeTelegramMessageMedia(rawOriginal, cachedPeerType);
+                    const origSenderId = String(rawOriginal.senderId?.valueOf() || '');
+                    // Resolve sender name from raw message entities or group members
+                    let origSenderName = '';
+                    const origSender = rawOriginal.sender || rawOriginal.fromId;
+                    if (origSender?.firstName) {
+                        origSenderName = [origSender.firstName, origSender.lastName].filter(Boolean).join(' ');
+                    }
+                    if (!origSenderName && origSenderId) {
+                        const member = db?.queryOne(`SELECT display_name FROM page_group_member WHERE owner_zalo_id = ? AND group_id = ? AND member_id = ?`, [accountId, chatId, origSenderId]);
+                        origSenderName = member?.display_name || '';
+                    }
+                    quoteData = buildTelegramQuoteData({
+                        msgId: replyToId,
+                        content: originalMedia.content,
+                        msgType: originalMedia.msgType,
+                        senderId: origSenderId,
+                        senderName: origSenderName,
+                        attachments: originalMedia.attachments,
+                    });
+                }
+                else {
+                    const original = db?.queryOne(`SELECT content, msg_type, sender_id, attachments, local_paths FROM messages
+             WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [replyToId, accountId, chatId]);
+                    if (original) {
+                        // Resolve sender name from group members
+                        let origSenderName2 = '';
+                        if (original.sender_id) {
+                            const member2 = db?.queryOne(`SELECT display_name FROM page_group_member WHERE owner_zalo_id = ? AND group_id = ? AND member_id = ?`, [accountId, chatId, original.sender_id]);
+                            origSenderName2 = member2?.display_name || '';
+                        }
+                        quoteData = buildTelegramQuoteData({
+                            msgId: replyToId,
+                            content: original.content,
+                            msgType: original.msg_type,
+                            senderId: original.sender_id,
+                            senderName: origSenderName2,
+                            attachments: original.attachments,
+                            localPaths: original.local_paths,
+                        });
+                    }
+                }
+            }
+            const existingMessage = db?.queryOne(`SELECT local_paths FROM messages
+         WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [msgId, accountId, chatId]);
+            const normalizedMessage = {
+                msg_id: msgId,
+                owner_zalo_id: accountId,
+                thread_id: chatId,
+                thread_type: (chatId.startsWith('-') ? 1 : 0),
+                sender_id: senderId,
+                content,
+                msg_type: msgType,
+                timestamp,
+                is_sent: isSelf ? 1 : 0,
+                status: 'received',
+                attachments: attachments.length ? JSON.stringify(attachments) : '[]',
+                reactions: JSON.stringify(reactions),
+                channel: 'telegram_user',
+                reply_to_id: replyToId || null,
+                quote_data: quoteData || null,
+                topic_id: topicId || null,
+                local_paths: existingMessage?.local_paths || null,
+            };
+            messages.push(normalizedMessage);
+            // Persist to DB
+            if (db) {
+                try {
+                    db.run(`
+            INSERT OR IGNORE INTO messages
+              (msg_id, owner_zalo_id, thread_id, thread_type, sender_id, content, msg_type, timestamp, is_sent, attachments, reactions, status, channel, reply_to_id, quote_data, topic_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', 'telegram_user', ?, ?, ?)
+          `, [msgId, accountId, chatId, chatId.startsWith('-') ? 1 : 0, senderId, content, msgType, timestamp, isSelf ? 1 : 0, attachments.length ? JSON.stringify(attachments) : '[]', JSON.stringify(reactions), replyToId || null, quoteData || null, topicId || null]);
+                    // Repair legacy API-synced rows without replaying contact/unread/UI
+                    // side effects. local_paths remains untouched.
+                    db.run(`
+            UPDATE messages
+            SET attachments = CASE WHEN ? != '[]' THEN ? ELSE attachments END,
+                msg_type = CASE WHEN msg_type = 'text' AND ? != 'text' THEN ? ELSE msg_type END,
+                reactions = ?,
+                reply_to_id = ?,
+                quote_data = COALESCE(quote_data, ?),
+                topic_id = COALESCE(topic_id, ?)
+            WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'
+          `, [JSON.stringify(attachments), JSON.stringify(attachments), msgType, msgType, JSON.stringify(reactions), replyToId || null, quoteData || null, topicId || null, msgId, accountId, chatId]);
+                }
+                catch { }
+            }
+            // API history can contain media that was never seen by the realtime
+            // listener. Hydrate the visible item and let event:localPath update the
+            // same store row; existing files are never downloaded again.
+            const hasLocalMedia = !!existingMessage?.local_paths && existingMessage.local_paths !== '{}';
+            if (msg.media && !hasLocalMedia && scheduledMediaDownloads < 12) {
+                scheduledMediaDownloads++;
+                downloadMediaForMessage(accountId, listener.client, msg, msgId, msgType, chatId).catch(() => { });
+            }
+            // History imports can contain thousands of rows. Yield periodically so
+            // Electron can paint, handle IPC, and keep the connection heartbeat alive
+            // instead of monopolising the main process in one synchronous loop.
+            if (messages.length % 100 === 0) {
+                await new Promise(resolve => setImmediate(resolve));
+            }
+        }
+        // Notify UI to refresh contacts from DB (updates last_message/time in conversation list)
+        if (messages.length > 0) {
+            EventBroadcaster_1.default.emit('db:unreadChanged', { zaloId: accountId, source: 'telegram_get_messages' });
+        }
+        // Manual history import only needs the persisted rows. Returning thousands
+        // of rich message objects across IPC duplicates memory in main/preload/
+        // renderer and makes the chat appear frozen.
+        return opts?.returnMessages === false
+            ? { success: true, count: messages.length }
+            : { success: true, messages, count: messages.length };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/** Repair legacy Telegram quote previews in one account-scoped batch.
+ * Local DB originals are preferred; only genuinely missing originals trigger
+ * one batched MTProto lookup. This never inserts messages or emits unread/UI
+ * new-message events. */
+function repairMessageQuotes(accountId, chatId, items) {
+    const safeItems = (Array.isArray(items) ? items : [])
+        .slice(0, 100)
+        .map(item => ({ messageId: String(item?.messageId || ''), replyToId: String(item?.replyToId || '') }));
+    const previous = quoteRepairQueues.get(accountId) ?? Promise.resolve();
+    const task = previous.catch(() => { }).then(() => repairMessageQuotesNow(accountId, chatId, safeItems));
+    let settled;
+    settled = task.finally(() => {
+        if (quoteRepairQueues.get(accountId) === settled)
+            quoteRepairQueues.delete(accountId);
+    });
+    quoteRepairQueues.set(accountId, settled);
+    return settled;
+}
+async function repairMessageQuotesNow(accountId, chatId, items) {
+    const db = DatabaseService_1.default.getInstance();
+    if (!db || !accountId || !chatId || items.length === 0) {
+        return { success: false, error: 'Invalid Telegram quote repair request' };
+    }
+    const results = [];
+    const pending = new Map();
+    let localCount = 0;
+    let routingCount = 0;
+    for (const item of items) {
+        const numericMessageId = Number(item.messageId);
+        const numericReplyToId = Number(item.replyToId);
+        if (!Number.isSafeInteger(numericMessageId) || numericMessageId <= 0 ||
+            !Number.isSafeInteger(numericReplyToId) || numericReplyToId <= 0) {
+            results.push({ ...item, status: 'invalid' });
+            continue;
+        }
+        const current = db.queryOne(`SELECT reply_to_id, quote_data, topic_id FROM messages
+       WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [item.messageId, accountId, chatId]);
+        if (!current || String(current.reply_to_id || '') !== item.replyToId) {
+            results.push({ ...item, status: 'invalid' });
+            continue;
+        }
+        // Legacy forum rows stored the topic root as reply_to_id. It is routing
+        // metadata and must not produce a quote preview.
+        if (current.topic_id != null && String(current.topic_id) === item.replyToId) {
+            db.run(`UPDATE messages SET reply_to_id = NULL
+         WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [item.messageId, accountId, chatId]);
+            routingCount++;
+            results.push({ ...item, status: 'topic_routing' });
+            continue;
+        }
+        if (hasUsableTelegramQuoteData(current.quote_data)) {
+            results.push({ ...item, status: 'repaired', quoteData: current.quote_data });
+            continue;
+        }
+        const original = db.queryOne(`SELECT content, msg_type, sender_id, attachments, local_paths FROM messages
+       WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [item.replyToId, accountId, chatId]);
+        if (original) {
+            // Resolve sender name from group members
+            let senderName = '';
+            if (original.sender_id) {
+                const member = db.queryOne(`SELECT display_name FROM page_group_member WHERE owner_zalo_id = ? AND group_id = ? AND member_id = ?`, [accountId, chatId, original.sender_id]);
+                senderName = member?.display_name || '';
+            }
+            const quoteData = buildTelegramQuoteData({
+                msgId: item.replyToId,
+                content: original.content,
+                msgType: original.msg_type,
+                senderId: original.sender_id,
+                senderName,
+                attachments: original.attachments,
+                localPaths: original.local_paths,
+            });
+            if (hasUsableTelegramQuoteData(quoteData)) {
+                db.run(`UPDATE messages SET quote_data = ?
+           WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [quoteData, item.messageId, accountId, chatId]);
+                localCount++;
+                results.push({ ...item, status: 'repaired', quoteData });
+                continue;
+            }
+        }
+        const waiting = pending.get(item.replyToId) || [];
+        waiting.push(item);
+        pending.set(item.replyToId, waiting);
+    }
+    let apiCount = 0;
+    let apiLookupCompleted = false;
+    const listener = activeListeners.get(accountId);
+    if (pending.size > 0 && listener?.client && listener.connected) {
+        try {
+            const peer = await resolveInputPeer(accountId, listener.client, chatId);
+            const ids = [...pending.keys()].map(Number).filter(id => Number.isSafeInteger(id) && id > 0);
+            const fetched = await listener.client.getMessages(peer, { ids });
+            const fetchedById = new Map();
+            for (const message of fetched || []) {
+                if (message?.id != null && message?.className !== 'MessageEmpty') {
+                    fetchedById.set(String(message.id), message);
+                }
+            }
+            apiLookupCompleted = true;
+            const cachedPeerType = db.getTelegramPeer(accountId, chatId)?.peer_type;
+            for (const [replyToId, waiting] of pending) {
+                const original = fetchedById.get(replyToId);
+                if (!original)
+                    continue;
+                const normalized = normalizeTelegramMessageMedia(original, cachedPeerType);
+                let localPath = '';
+                if (normalized.msgType === 'photo' || normalized.msgType === 'image') {
+                    localPath = await downloadMediaForMessage(accountId, listener.client, original, replyToId, normalized.msgType, chatId) || '';
+                }
+                // Resolve sender name from raw message or group members
+                let senderName = '';
+                const sender = original.sender || original.fromId;
+                if (sender?.firstName) {
+                    senderName = [sender.firstName, sender.lastName].filter(Boolean).join(' ');
+                }
+                if (!senderName) {
+                    const senderId = String(original.senderId?.valueOf() || '');
+                    if (senderId) {
+                        const member = db.queryOne(`SELECT display_name FROM page_group_member WHERE owner_zalo_id = ? AND group_id = ? AND member_id = ?`, [accountId, chatId, senderId]);
+                        senderName = member?.display_name || '';
+                    }
+                }
+                const quoteData = buildTelegramQuoteData({
+                    msgId: replyToId,
+                    content: normalized.content,
+                    msgType: normalized.msgType,
+                    senderId: String(original.senderId?.valueOf() || ''),
+                    senderName,
+                    attachments: normalized.attachments,
+                    localPaths: localPath ? { main: localPath } : undefined,
+                });
+                for (const item of waiting) {
+                    db.run(`UPDATE messages SET quote_data = ?
+             WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [quoteData, item.messageId, accountId, chatId]);
+                    results.push({ ...item, status: 'repaired', quoteData });
+                    apiCount++;
+                }
+                pending.delete(replyToId);
+            }
+        }
+        catch (err) {
+            tgLog('warn', accountId, 'history', 'QUOTE_REPAIR_API_FAILED', {
+                chatId,
+                requested: pending.size,
+                error: err?.message || String(err),
+            });
+        }
+    }
+    for (const waiting of pending.values()) {
+        for (const item of waiting) {
+            const status = apiLookupCompleted ? 'not_found' : 'deferred';
+            results.push({ ...item, status });
+            tgLog(status === 'not_found' ? 'warn' : 'info', accountId, 'history', status === 'not_found' ? 'QUOTE_REPAIR_NOT_FOUND' : 'QUOTE_REPAIR_DEFERRED', {
+                chatId,
+                messageId: item.messageId,
+                replyToId: item.replyToId,
+                connected: !!listener?.connected,
+            });
+        }
+    }
+    tgLog('info', accountId, 'history', 'QUOTE_REPAIR_COMPLETED', {
+        chatId,
+        requested: items.length,
+        local: localCount,
+        api: apiCount,
+        topicRouting: routingCount,
+        notFound: results.filter(result => result.status === 'not_found').length,
+        deferred: results.filter(result => result.status === 'deferred').length,
+    });
+    return { success: true, results };
+}
+/**
+ * Repair a legacy Telegram media row without replaying message side effects.
+ *
+ * MTProto photo/document attachments do not expose a durable CDN URL. Older
+ * rows that were persisted before the media downloader ran therefore cannot
+ * be rendered from attachment metadata alone. Fetching the exact message by
+ * peer + message ID refreshes Telegram's file reference, after which the
+ * normal account-scoped download queue can hydrate local_paths in place.
+ */
+function repairMessageMedia(accountId, chatId, messageId) {
+    const previous = mediaRepairQueues.get(accountId) ?? Promise.resolve();
+    const task = previous.catch(() => { }).then(() => repairMessageMediaNow(accountId, chatId, messageId));
+    let settled;
+    settled = task.finally(() => {
+        if (mediaRepairQueues.get(accountId) === settled)
+            mediaRepairQueues.delete(accountId);
+    });
+    mediaRepairQueues.set(accountId, settled);
+    return settled;
+}
+async function repairEmptyMessages(accountId, chatId, messageIds) {
+    const listener = activeListeners.get(accountId);
+    if (!listener?.client || !listener.connected)
+        return { success: false, error: 'Telegram listener is not connected' };
+    try {
+        const ids = Array.from(new Set(messageIds.map(Number).filter(id => Number.isSafeInteger(id) && id > 0))).slice(0, 100);
+        if (!ids.length)
+            return { success: true, results: [] };
+        const peer = await resolveInputPeer(accountId, listener.client, chatId);
+        const fetched = await listener.client.getMessages(peer, { ids });
+        const db = DatabaseService_1.default.getInstance();
+        const peerType = db?.getTelegramPeer(accountId, chatId)?.peer_type;
+        const results = [];
+        for (const message of fetched) {
+            if (!message || message.className === 'MessageEmpty')
+                continue;
+            const messageId = String(message.id || '');
+            const normalized = normalizeTelegramMessageMedia(message, peerType);
+            const mediaClass = String(message?.media?.className || 'MessageMediaEmpty');
+            const resolved = !!normalized.content.trim() || normalized.msgType !== 'text' || normalized.attachments.length > 0;
+            if (db && resolved) {
+                db.run(`UPDATE messages SET content = ?, msg_type = ?, attachments = ?, topic_id = COALESCE(topic_id, ?)
+           WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [normalized.content, normalized.msgType, JSON.stringify(normalized.attachments),
+                    getForumTopicId(message) || null, messageId, accountId, chatId]);
+            }
+            const result = {
+                messageId, resolved, content: normalized.content, msgType: normalized.msgType,
+                attachments: normalized.attachments, mediaClass,
+            };
+            results.push(result);
+            tgLog(resolved ? 'info' : 'warn', accountId, 'history', resolved ? 'EMPTY_MESSAGE_REPAIRED' : 'EMPTY_MESSAGE_UNRESOLVED', {
+                chatId, messageId, msgType: normalized.msgType, mediaClass,
+            });
+        }
+        return { success: true, results };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+async function repairMessageMediaNow(accountId, chatId, messageId) {
+    const listener = activeListeners.get(accountId);
+    const numericMessageId = Number(messageId);
+    tgLog('info', accountId, 'history', 'MEDIA_REPAIR_REQUESTED', {
+        chatId,
+        messageId,
+        connected: !!listener?.connected,
+    });
+    if (!listener?.client || !listener.connected) {
+        tgLog('warn', accountId, 'history', 'MEDIA_REPAIR_DEFERRED_NOT_CONNECTED', { chatId, messageId });
+        return { success: false, error: 'Telegram listener is not connected' };
+    }
+    if (!chatId || !Number.isSafeInteger(numericMessageId) || numericMessageId <= 0) {
+        return { success: false, error: 'Invalid Telegram media identity' };
+    }
+    try {
+        // getMessages() may already be hydrating this visible row. Reuse that
+        // download instead of issuing a second exact-message RPC/file transfer.
+        const existingDownload = inFlightDownloadKeys.get(`media:${chatId}:${messageId}`);
+        if (existingDownload) {
+            await existingDownload;
+            const hydrated = DatabaseService_1.default.getInstance()?.queryOne(`SELECT local_paths, attachments, msg_type FROM messages
+         WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [messageId, accountId, chatId]);
+            try {
+                const localPaths = JSON.parse(hydrated?.local_paths || '{}');
+                if (Object.values(localPaths).some(Boolean)) {
+                    tgLog('info', accountId, 'history', 'MEDIA_REPAIR_REUSED_DOWNLOAD', {
+                        chatId,
+                        messageId,
+                        msgType: hydrated?.msg_type || '-',
+                    });
+                    return {
+                        success: true,
+                        localPaths,
+                        attachments: JSON.parse(hydrated?.attachments || '[]'),
+                        msgType: hydrated?.msg_type || undefined,
+                    };
+                }
+            }
+            catch { }
+        }
+        const peer = await resolveInputPeer(accountId, listener.client, chatId);
+        const fetched = await listener.client.getMessages(peer, { ids: [numericMessageId] });
+        const message = (fetched || []).find((item) => String(item?.id || '') === messageId);
+        if (!message) {
+            tgLog('warn', accountId, 'history', 'MEDIA_REPAIR_MESSAGE_NOT_FOUND', { chatId, messageId });
+            return { success: false, error: 'Telegram message was not found' };
+        }
+        if (!message.media) {
+            tgLog('warn', accountId, 'history', 'MEDIA_REPAIR_NO_MEDIA', {
+                chatId,
+                messageId,
+                messageClass: message?.className || '-',
+            });
+            return { success: false, error: 'Telegram message no longer contains media' };
+        }
+        const db = DatabaseService_1.default.getInstance();
+        const cachedPeerType = db?.getTelegramPeer(accountId, chatId)?.peer_type;
+        const normalized = normalizeTelegramMessageMedia(message, cachedPeerType);
+        // Repair attachment/type metadata left sparse by the legacy API-history
+        // path. This intentionally does not touch contacts, unread counts or UI
+        // new-message events.
+        if (db && normalized.attachments.length > 0) {
+            db.run(`
+        UPDATE messages
+        SET attachments = ?,
+            msg_type = CASE WHEN msg_type = 'text' OR msg_type = 'photo' THEN ? ELSE msg_type END,
+            topic_id = COALESCE(topic_id, ?)
+        WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'
+      `, [
+                JSON.stringify(normalized.attachments),
+                normalized.msgType,
+                getForumTopicId(message) || null,
+                messageId,
+                accountId,
+                chatId,
+            ]);
+        }
+        const localPath = await downloadMediaForMessage(accountId, listener.client, message, messageId, normalized.msgType, chatId);
+        if (!localPath) {
+            return { success: false, error: 'Telegram media download returned no data' };
+        }
+        const localPaths = {};
+        if (normalized.msgType === 'photo')
+            localPaths.main = localPath;
+        else if (normalized.msgType === 'video')
+            localPaths.video = localPath;
+        else if (normalized.msgType === 'audio')
+            localPaths.voice = localPath;
+        else
+            localPaths.file = localPath;
+        tgLog('info', accountId, 'history', 'MEDIA_REPAIR_COMPLETED', {
+            chatId,
+            messageId,
+            msgType: normalized.msgType,
+            attachmentTypes: normalized.attachments.map((attachment) => attachment?.type || '-').join(','),
+        });
+        return {
+            success: true,
+            localPaths,
+            attachments: normalized.attachments,
+            msgType: normalized.msgType,
+        };
+    }
+    catch (err) {
+        tgLog('warn', accountId, 'history', 'MEDIA_REPAIR_FAILED', {
+            chatId,
+            messageId,
+            error: err?.message || String(err),
+        });
+        return { success: false, error: err?.message || String(err) };
+    }
+}
+/**
+ * Forward message (User API)
+ */
+async function forwardMessages(accountId, fromChatId, toChatId, messageIds) {
+    const listener = activeListeners.get(accountId);
+    if (!listener?.client || !listener.connected)
+        return { success: false, error: 'Not connected' };
+    const denial = getPersistedTelegramSendDenial(accountId, toChatId);
+    if (denial)
+        return { success: false, error: denial };
+    try {
+        const [toPeer, fromPeer] = await Promise.all([
+            resolveInputPeer(accountId, listener.client, toChatId),
+            resolveInputPeer(accountId, listener.client, fromChatId),
+        ]);
+        await listener.client.forwardMessages(toPeer, {
+            messages: messageIds.map(Number),
+            fromPeer,
+        });
+        return { success: true };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Send file/media (User API)
+ */
+async function sendFile(accountId, chatId, filePath, caption, fileType, replyToMsgId) {
+    const listener = activeListeners.get(accountId);
+    if (!listener?.client || !listener.connected)
+        return { success: false, error: 'Not connected' };
+    const denial = getPersistedTelegramSendDenial(accountId, chatId);
+    if (denial)
+        return { success: false, error: denial };
+    const rateLimit = checkRateLimit(accountId);
+    if (!rateLimit.allowed)
+        return { success: false, error: `Rate limited. Wait ${rateLimit.waitSeconds}s.` };
+    try {
+        const peer = await resolveInputPeer(accountId, listener.client, chatId);
+        const pathMod = require('path');
+        const fs = require('fs');
+        // Resolve local-media URLs and storage-relative DB paths before upload.
+        let resolvedPath = resolveTelegramUploadPath(filePath);
+        resolvedPath = resolvedPath.replace(/\//g, pathMod.sep);
+        if (!fs.existsSync(resolvedPath)) {
+            Logger_1.default.error(`[TG:sendFile] File not found: ${resolvedPath} (original: ${filePath})`);
+            return { success: false, error: `File không tồn tại: ${pathMod.basename(resolvedPath)}` };
+        }
+        Logger_1.default.log(`[TG:sendFile] STEP1 Sending ${resolvedPath}`);
+        // Use client.sendFile() — handles upload + response parsing + message ID extraction
+        const sendOpts = { file: resolvedPath, forceDocument: fileType === 'file' };
+        if (caption)
+            sendOpts.message = caption;
+        if (replyToMsgId)
+            sendOpts.replyTo = Number(replyToMsgId);
+        Logger_1.default.log(`[TG:sendFile] STEP2 sendOpts:`, JSON.stringify({ file: resolvedPath, forceDocument: sendOpts.forceDocument, hasCaption: !!caption }));
+        const result = await listener.client.sendFile(peer, sendOpts);
+        // client.sendFile() returns a Message object with .id (proper 32-bit Telegram msgId)
+        const msgId = String(result?.id || '');
+        const now = Date.now();
+        const threadType = chatId.startsWith('-') ? 1 : 0;
+        Logger_1.default.log(`[TG:sendFile] STEP3 result: id=${msgId} className=${result?.className} hasMedia=${!!result?.media}`);
+        Logger_1.default.log(`[TG:sendFile] SUCCESS msgId=${msgId} result.className=${result?.className} result.id=${String(result?.id)}`);
+        // Extract attachments from GramJS Message result
+        const attachments = [];
+        let msgType = 'file';
+        const media = result?.media;
+        if (media) {
+            if (media.photo) {
+                // Photo: array of PhotoSize — take the largest (last element)
+                const photos = media.photo.sizes || [];
+                const largest = photos[photos.length - 1];
+                if (largest) {
+                    attachments.push({
+                        type: 'photo',
+                        file_id: String(largest.src?.volumeId || ''),
+                        width: largest.w || 0,
+                        height: largest.h || 0,
+                        file_size: largest.size || 0,
+                    });
+                }
+                msgType = 'photo';
+            }
+            else if (media.document) {
+                const doc = media.document;
+                const fileName = (doc.attributes || []).find((a) => a.fileName)?.fileName || pathMod.basename(resolvedPath);
+                const mimeType = doc.mimeType || '';
+                // Detect type from attributes
+                const isVideo = (doc.attributes || []).some((a) => a.className === 'DocumentAttributeVideo');
+                const isAudio = (doc.attributes || []).some((a) => a.className === 'DocumentAttributeAudio');
+                const isVoice = (doc.attributes || []).some((a) => a.className === 'DocumentAttributeAudio' && a.voice);
+                const isSticker = (doc.attributes || []).some((a) => a.className === 'DocumentAttributeSticker');
+                if (isVoice)
+                    msgType = 'voice';
+                else if (isVideo)
+                    msgType = 'video';
+                else if (isAudio)
+                    msgType = 'audio';
+                else if (isSticker)
+                    msgType = 'sticker';
+                attachments.push({
+                    type: isSticker ? 'sticker' : isVoice ? 'voice' : isAudio ? 'audio' : isVideo ? 'video' : 'file',
+                    file_id: String(doc.id?.valueOf?.() || doc.id || ''),
+                    file_name: fileName,
+                    mime_type: mimeType,
+                    file_size: doc.size || 0,
+                    is_sticker: isSticker,
+                });
+            }
+        }
+        // Determine msgType: ưu tiên fileType từ UI, fallback extension, fallback media attributes
+        const ext = pathMod.extname(resolvedPath).toLowerCase();
+        if (fileType === 'image')
+            msgType = 'photo';
+        else if (fileType === 'video')
+            msgType = 'video';
+        else if (fileType === 'audio')
+            msgType = 'audio';
+        else if (!msgType || msgType === 'file') {
+            // Fallback: detect from extension
+            if (['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'].includes(ext))
+                msgType = 'photo';
+            else if (['.mp4', '.avi', '.mov', '.mkv', '.webm'].includes(ext))
+                msgType = 'video';
+            else if (['.mp3', '.ogg', '.wav', '.m4a', '.aac', '.flac'].includes(ext))
+                msgType = 'audio';
+        }
+        Logger_1.default.log(`[TG:sendFile] STEP4 msgType=${msgType} attachments=${attachments.length} attachmentTypes=${attachments.map((a) => a.type).join(',')}`);
+        // Media preview for contacts.last_message
+        const mediaPreview = msgType === 'photo' ? '🖼️ Hình ảnh'
+            : msgType === 'video' ? '🎬 Video'
+                : msgType === 'audio' ? '🎵 Audio'
+                    : caption || '📎 File';
+        // Build quote_data nếu reply
+        let quoteData = null;
+        if (replyToMsgId) {
+            const dbQuote = DatabaseService_1.default.getInstance()?.queryOne(`SELECT content, msg_type, sender_id FROM messages WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [replyToMsgId, accountId, chatId]);
+            if (dbQuote) {
+                quoteData = JSON.stringify({ msgId: replyToMsgId, msg: dbQuote.content || '', senderId: dbQuote.sender_id || '', msgType: dbQuote.msg_type || 'text' });
+            }
+            else {
+                quoteData = JSON.stringify({ msgId: replyToMsgId, msg: '', senderId: '', msgType: 'text' });
+            }
+        }
+        // Save to DB WITH attachments (socket echo sẽ skip vì đã tồn tại)
+        const db = DatabaseService_1.default.getInstance();
+        if (db) {
+            db.run(`INSERT OR IGNORE INTO messages (msg_id, owner_zalo_id, thread_id, thread_type, sender_id, content, msg_type, timestamp, is_sent, attachments, status, channel, reply_to_id, quote_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'sent', 'telegram_user', ?, ?)`, [msgId, accountId, chatId, threadType, accountId, caption || '', msgType, now, JSON.stringify(attachments), replyToMsgId || null, quoteData]);
+            db.run(`
+        INSERT INTO contacts (owner_zalo_id, contact_id, display_name, avatar_url, is_friend, contact_type, unread_count, last_message, last_message_time, channel, is_in_others)
+        VALUES (?, ?, '', '', 0, ?, 0, ?, ?, 'telegram_user', 0)
+        ON CONFLICT(owner_zalo_id, contact_id) DO UPDATE SET
+          last_message = CASE WHEN excluded.last_message_time >= COALESCE(contacts.last_message_time, 0) THEN excluded.last_message ELSE contacts.last_message END,
+          last_message_time = CASE WHEN excluded.last_message_time >= COALESCE(contacts.last_message_time, 0) THEN excluded.last_message_time ELSE contacts.last_message_time END
+      `, [accountId, chatId, threadType === 1 ? 'group' : 'user', mediaPreview, now]);
+            Logger_1.default.log(`[TG:sendFile] STEP5 DB saved msgId=${msgId} msgType=${msgType} attachments=${attachments.length}`);
+        }
+        // Emit event để UI thêm tin nhắn ngay (msgType đúng, socket echo KHÔNG arrive cho self-sent)
+        Logger_1.default.log(`[TG:sendFile] EMITTING event: msgId=${msgId} msgType=${msgType} chatId=${chatId}`);
+        EventBroadcaster_1.default.emit('event:message', {
+            zaloId: accountId,
+            channel: 'telegram_user',
+            message: {
+                channel: 'telegram_user',
+                type: threadType,
+                threadId: chatId,
+                isSelf: true,
+                _silentNotification: true,
+                data: {
+                    uidFrom: accountId,
+                    idTo: chatId,
+                    msgId,
+                    content: caption || '',
+                    preview: (0, TelegramMessagePreview_1.getTelegramMessagePreview)(msgType, caption || ''),
+                    msgType,
+                    channel: 'telegram_user',
+                    ts: String(now),
+                    attachments,
+                    replyToId: replyToMsgId || undefined,
+                    quoteData: quoteData || undefined,
+                },
+            },
+        });
+        Logger_1.default.log(`[TG:sendFile] STEP6 EVENT_EMITTED msgId=${msgId}`);
+        // Trigger background download NGAY — không rely vào handleNewMessage
+        // (socket echo có thể không arrive cho self-sent GramJS messages)
+        if (result?.media && listener.client) {
+            Logger_1.default.log(`[TG:sendFile] STEP7 Starting background download for msgId=${msgId}`);
+            downloadMediaForMessage(accountId, listener.client, result, msgId, msgType, chatId).catch(err => {
+                Logger_1.default.error(`[TG:sendFile] STEP7 download FAILED msgId=${msgId} error=${err.message}`);
+            });
+        }
+        else {
+            Logger_1.default.log(`[TG:sendFile] STEP7 SKIPPED no media or no client: hasMedia=${!!result?.media} hasClient=${!!listener.client}`);
+        }
+        Logger_1.default.log(`[TG:sendFile] DONE msgId=${msgId} msgType=${msgType} (waiting for background download + socket echo)`);
+        return { success: true, messageId: msgId };
+    }
+    catch (err) {
+        Logger_1.default.error(`[TG:sendFile] FAILED: ${err.message}`);
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Send typing action (User API)
+ */
+async function sendTyping(accountId, chatId) {
+    const listener = activeListeners.get(accountId);
+    if (!listener?.client || !listener.connected)
+        return { success: false, error: 'Not connected' };
+    try {
+        const { Api } = require('telegram');
+        const peer = await resolveInputPeer(accountId, listener.client, chatId);
+        await listener.client.invoke(new Api.messages.SetTyping({
+            peer,
+            action: new Api.SendMessageTypingAction(),
+        }));
+        return { success: true };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+// ─── Login Flow ──────────────────────────────────────────────────────────────
+/**
+ * Bước 1: Gửi mã OTP đến số điện thoại
+ */
+async function sendCode(phoneNumber) {
+    if (!telegram_config_1.API_ID || !telegram_config_1.API_HASH) {
+        return { success: false, error: 'Telegram API credentials chưa được cấu hình' };
+    }
+    try {
+        await clearPendingLogin();
+        const stringSession = new sessions_1.StringSession('');
+        const client = new telegram_1.TelegramClient(stringSession, telegram_config_1.API_ID, telegram_config_1.API_HASH, {
+            connectionRetries: 3,
+        });
+        await client.connect();
+        const result = await client.sendCode({ apiId: telegram_config_1.API_ID, apiHash: telegram_config_1.API_HASH }, phoneNumber);
+        // Store client temporarily for next step
+        pendingLogin = { client, phoneNumber, phoneCodeHash: result.phoneCodeHash, expiresAt: Date.now() + LOGIN_SESSION_TTL_MS };
+        return { success: true, phoneCodeHash: result.phoneCodeHash };
+    }
+    catch (err) {
+        await clearPendingLogin();
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Bước 2: Xác nhận mã OTP
+ */
+async function signIn(phoneNumber, code, phoneCodeHash) {
+    const pending = getPendingLogin();
+    if (!pending) {
+        return { success: false, error: 'Phiên đăng nhập đã hết hạn. Vui lòng thử lại.' };
+    }
+    if (pending.phoneNumber !== phoneNumber || pending.phoneCodeHash !== phoneCodeHash) {
+        return { success: false, error: 'Mã xác nhận không thuộc phiên đăng nhập hiện tại. Vui lòng gửi lại mã.' };
+    }
+    const { client } = pending;
+    try {
+        const { Api } = require('telegram');
+        // signInUser() would invoke auth.SendCode a second time. The UI already
+        // holds the hash from sendCode(), so complete this exact OTP transaction.
+        await client.invoke(new Api.auth.SignIn({ phoneNumber, phoneCodeHash, phoneCode: code }));
+        const me = await client.getMe();
+        const accountId = String(me.id);
+        const stringSession = client.session.save();
+        // Lấy thông tin user
+        const userInfo = {
+            firstName: me.firstName || '',
+            lastName: me.lastName || '',
+            phone: phoneNumber,
+            username: me.username || '',
+        };
+        await clearPendingLogin();
+        return { success: true, stringSession, accountId, userInfo };
+    }
+    catch (err) {
+        // Check if 2FA is required
+        if (err.message?.includes('PASSWORD') || err.message?.includes('2FA') || err.message?.includes('password')) {
+            return { success: false, error: '2FA_REQUIRED' };
+        }
+        await clearPendingLogin();
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Add or remove the current account's reaction on a message (User MTProto API).
+ * Telegram removes every reaction from this account when the reaction vector is
+ * empty. Reactions are scoped to the peer and message id; a forum topic does
+ * not need a separate topMsgId for this RPC.
+ */
+async function sendReaction(accountId, chatId, messageId, emoji) {
+    const listener = activeListeners.get(accountId);
+    if (!listener?.client || !listener.connected)
+        return { success: false, error: 'Not connected' };
+    const numericMessageId = Number(String(messageId).replace(/^tg_/, ''));
+    if (!Number.isSafeInteger(numericMessageId) || numericMessageId <= 0) {
+        return { success: false, error: 'Telegram message ID không hợp lệ.' };
+    }
+    try {
+        const { Api } = require('telegram');
+        const peer = await resolveInputPeer(accountId, listener.client, chatId);
+        await listener.client.invoke(new Api.messages.SendReaction({
+            peer,
+            msgId: numericMessageId,
+            reaction: emoji ? [new Api.ReactionEmoji({ emoticon: emoji })] : [],
+            addToRecent: !!emoji,
+        }));
+        return { success: true };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/** Send a file/media into a forum topic. GramJS maps `topMsgId` to
+ * InputReplyToMessage.topMsgId, which is required in addition to a reply ID
+ * so Telegram does not route the upload to the forum parent timeline. */
+async function sendTopicFile(accountId, chatId, topicRootMessageId, filePath, caption, fileType) {
+    const listener = activeListeners.get(accountId);
+    if (!listener?.client || !listener.connected)
+        return { success: false, error: 'Telegram client not connected' };
+    const denial = getPersistedTelegramSendDenial(accountId, chatId);
+    if (denial)
+        return { success: false, error: denial };
+    const rateLimit = checkRateLimit(accountId);
+    if (!rateLimit.allowed)
+        return { success: false, error: `Gửi tin quá nhanh. Vui lòng chờ ${rateLimit.waitSeconds} giây.` };
+    try {
+        const peer = await resolveInputPeer(accountId, listener.client, chatId);
+        const pathMod = require('path');
+        const fs = require('fs');
+        // Resolve local-media URLs and storage-relative DB paths before upload.
+        let resolvedPath = resolveTelegramUploadPath(filePath);
+        resolvedPath = resolvedPath.replace(/\//g, pathMod.sep);
+        if (!fs.existsSync(resolvedPath)) {
+            Logger_1.default.error(`[TG:sendTopicFile] File not found: ${resolvedPath} (original: ${filePath})`);
+            return { success: false, error: `File không tồn tại: ${pathMod.basename(resolvedPath)}` };
+        }
+        Logger_1.default.log(`[TG:sendTopicFile] Sending ${resolvedPath}`);
+        // Use client.sendFile() — handles upload + response parsing + message ID extraction
+        const sendOpts = { file: resolvedPath, forceDocument: fileType === 'file', topMsgId: Number(topicRootMessageId) };
+        if (caption)
+            sendOpts.message = caption;
+        const result = await listener.client.sendFile(peer, sendOpts);
+        const msgId = String(result?.id || '');
+        const now = Date.now();
+        const threadType = chatId.startsWith('-') ? 1 : 0;
+        // Extract attachments from GramJS Message result
+        const attachments = [];
+        let msgType = 'file';
+        const media = result?.media;
+        if (media) {
+            if (media.photo) {
+                const photos = media.photo.sizes || [];
+                const largest = photos[photos.length - 1];
+                if (largest) {
+                    attachments.push({ type: 'photo', file_id: String(largest.src?.volumeId || ''), width: largest.w || 0, height: largest.h || 0, file_size: largest.size || 0 });
+                }
+                msgType = 'photo';
+            }
+            else if (media.document) {
+                const doc = media.document;
+                const fileName = (doc.attributes || []).find((a) => a.fileName)?.fileName || pathMod.basename(resolvedPath);
+                const mimeType = doc.mimeType || '';
+                const isVideo = (doc.attributes || []).some((a) => a.className === 'DocumentAttributeVideo');
+                const isAudio = (doc.attributes || []).some((a) => a.className === 'DocumentAttributeAudio');
+                const isVoice = (doc.attributes || []).some((a) => a.className === 'DocumentAttributeAudio' && a.voice);
+                if (isVoice)
+                    msgType = 'voice';
+                else if (isVideo)
+                    msgType = 'video';
+                else if (isAudio)
+                    msgType = 'audio';
+                attachments.push({ type: isVoice ? 'voice' : isAudio ? 'audio' : isVideo ? 'video' : 'file', file_id: String(doc.id?.valueOf?.() || doc.id || ''), file_name: fileName, mime_type: mimeType, file_size: doc.size || 0 });
+            }
+        }
+        // Fallback: determine from extension
+        const ext = pathMod.extname(resolvedPath).toLowerCase();
+        if (fileType === 'image')
+            msgType = 'photo';
+        else if (fileType === 'video')
+            msgType = 'video';
+        else if (fileType === 'audio')
+            msgType = 'audio';
+        else if (msgType === 'file') {
+            if (['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'].includes(ext))
+                msgType = 'photo';
+            else if (['.mp4', '.avi', '.mov', '.mkv', '.webm'].includes(ext))
+                msgType = 'video';
+            else if (['.mp3', '.ogg', '.wav', '.m4a', '.aac', '.flac'].includes(ext))
+                msgType = 'audio';
+        }
+        const mediaPreview = msgType === 'photo' ? '🖼️ Hình ảnh' : msgType === 'video' ? '🎬 Video' : msgType === 'audio' ? '🎵 Audio' : caption || '📎 File';
+        // Save to DB WITH attachments
+        const db = DatabaseService_1.default.getInstance();
+        if (db) {
+            db.run(`INSERT OR IGNORE INTO messages (msg_id, owner_zalo_id, thread_id, thread_type, sender_id, content, msg_type, timestamp, is_sent, attachments, status, channel) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'sent', 'telegram_user')`, [msgId, accountId, chatId, threadType, accountId, caption || '', msgType, now, JSON.stringify(attachments)]);
+            db.run(`INSERT INTO contacts (owner_zalo_id, contact_id, display_name, avatar_url, is_friend, contact_type, unread_count, last_message, last_message_time, channel, is_in_others) VALUES (?, ?, '', '', 0, ?, 0, ?, ?, 'telegram_user', 0) ON CONFLICT(owner_zalo_id, contact_id) DO UPDATE SET last_message = CASE WHEN excluded.last_message_time >= COALESCE(contacts.last_message_time, 0) THEN excluded.last_message ELSE contacts.last_message END, last_message_time = CASE WHEN excluded.last_message_time >= COALESCE(contacts.last_message_time, 0) THEN excluded.last_message_time ELSE contacts.last_message_time END`, [accountId, chatId, threadType === 1 ? 'group' : 'user', mediaPreview, now]);
+        }
+        // Emit event với đầy đủ attachments
+        Logger_1.default.log(`[TG:sendTopicFile] EMITTING event: msgId=${msgId} msgType=${msgType} chatId=${chatId}`);
+        EventBroadcaster_1.default.emit('event:message', {
+            zaloId: accountId,
+            channel: 'telegram_user',
+            message: { channel: 'telegram_user', type: threadType, threadId: chatId, isSelf: true, _silentNotification: true,
+                data: { uidFrom: accountId, idTo: chatId, msgId, content: caption || '', preview: (0, TelegramMessagePreview_1.getTelegramMessagePreview)(msgType, caption || ''), msgType, channel: 'telegram_user', ts: String(now), attachments, topicId: topicRootMessageId } },
+        });
+        Logger_1.default.log(`[TG:sendTopicFile] EVENT_EMITTED msgId=${msgId} msgType=${msgType} attachments=${attachments.length}`);
+        return { success: true, messageId: msgId };
+    }
+    catch (err) {
+        Logger_1.default.error(`[TG:sendTopicFile] FAILED: ${err?.message || err}`);
+        return { success: false, error: err?.message || String(err) };
+    }
+}
+/**
+ * Bước 3: Xác nhận 2FA password (nếu có)
+ */
+async function signIn2FA(password) {
+    const pending = getPendingLogin();
+    if (!pending) {
+        return { success: false, error: 'Phiên đăng nhập đã hết hạn. Vui lòng thử lại.' };
+    }
+    const { client } = pending;
+    let authenticated = false;
+    try {
+        await client.signInWithPassword({ apiId: telegram_config_1.API_ID, apiHash: telegram_config_1.API_HASH }, {
+            password: async () => password,
+            onError: (err) => {
+                Logger_1.default.error(`[TelegramUserListener] 2FA error: ${err.message}`);
+            },
+        });
+        const me = await client.getMe();
+        const accountId = String(me.id);
+        const stringSession = client.session.save();
+        authenticated = true;
+        // Lấy thông tin user
+        const userInfo = {
+            firstName: me.firstName || '',
+            lastName: me.lastName || '',
+            phone: me.phone || '',
+            username: me.username || '',
+        };
+        return { success: true, stringSession, accountId, userInfo };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+    finally {
+        // Keep the pending MTProto auth state for another password attempt; OTP
+        // state is still valid until the short expiry. Clean up only after success.
+        if (authenticated)
+            await clearPendingLogin();
+    }
+}
+// ─── Utility ─────────────────────────────────────────────────────────────────
+/**
+ * Reset avatar cache cho 1 contact (khi user nhấn nút "Cập nhật thông tin")
+ */
+function resetContactAvatarCache(accountId, contactId) {
+    (0, avatarFetchCache_1.resetAvatarCache)(accountId, contactId);
+}
+function stopListener(accountId) {
+    const listener = activeListeners.get(accountId);
+    if (!listener)
+        return;
+    listener.stopped = true;
+    listener.connected = false;
+    if (listener.reconnectTimer) {
+        clearTimeout(listener.reconnectTimer);
+        listener.reconnectTimer = null;
+    }
+    clearHealthCheck(listener);
+    stopChannelPoller(listener);
+    if (listener.client) {
+        intentionallyDisconnectedClients.add(listener.client);
+        listener.client.disconnect().catch(() => { });
+    }
+    activeListeners.delete(accountId);
+    rawUpdateHandlers.delete(accountId);
+    channelPollQueues.delete(accountId);
+    activeChannelLeases.delete(accountId);
+    channelDialogWatchStates.delete(accountId);
+    channelDialogWatchTasks.delete(accountId);
+    reconnectCatchUps.delete(accountId);
+    const drainTimer = channelRecoveryDrainTimers.get(accountId);
+    if (drainTimer)
+        clearTimeout(drainTimer);
+    channelRecoveryDrainTimers.delete(accountId);
+    for (const [key, timer] of typingChannelRecoveryTimers) {
+        if (!key.startsWith(`${accountId}:`))
+            continue;
+        clearTimeout(timer);
+        typingChannelRecoveryTimers.delete(key);
+    }
+    channelRecoveryThrottles.delete(accountId);
+    for (const key of channelDifferenceQueues.keys()) {
+        if (key.startsWith(`${accountId}:`))
+            channelDifferenceQueues.delete(key);
+    }
+    Logger_1.default.log(`[TelegramUserListener] Stopped for ${accountId}`);
+}
+function stopAllListeners() {
+    for (const [id] of activeListeners) {
+        stopListener(id);
+    }
+}
+function getActiveListeners() {
+    return Array.from(activeListeners.values()).map(l => ({
+        accountId: l.account.accountId,
+        connected: l.connected,
+    }));
+}
+function isConnected(accountId) {
+    const listener = activeListeners.get(accountId);
+    return !!(listener?.connected && listener.client?.connected);
+}
+/**
+ * Fetch avatar cho chính tài khoản đang đăng nhập (self avatar).
+ * Dùng cho nút "Cập nhật thông tin" trên dashboard.
+ */
+async function fetchSelfAvatar(accountId) {
+    const listener = activeListeners.get(accountId);
+    if (!listener?.client || !listener.connected) {
+        return { success: false, error: 'Telegram chưa kết nối. Hãy kết nối lại trước.' };
+    }
+    try {
+        const me = await listener.client.getMe();
+        if (!me)
+            return { success: false, error: 'Không thể lấy thông tin tài khoản' };
+        const photo = await downloadProfilePhotoQueued(accountId, listener.client, me, `self:${accountId}`, true);
+        if (!photo || photo.length === 0) {
+            return { success: false, error: 'Tài khoản chưa có avatar' };
+        }
+        const avatarPath = `telegram_self_${accountId}_${Date.now()}.jpg`;
+        const savedPath = await saveAvatarToDisk(Buffer.from(photo), avatarPath);
+        if (!savedPath)
+            return { success: false, error: 'Không thể lưu avatar' };
+        // Convert absolute path → local-media:// URL (dùng được trong renderer <img src>)
+        const normalizedPath = savedPath.replace(/\\/g, '/');
+        const mediaUrl = 'local-media://' + (normalizedPath.startsWith('/') ? normalizedPath : '/' + normalizedPath);
+        // Cập nhật avatar_url trong accounts table
+        const db = DatabaseService_1.default.getInstance();
+        if (db) {
+            db.run(`UPDATE accounts SET avatar_url = ? WHERE zalo_id = ? AND channel = 'telegram_user'`, [mediaUrl, accountId]);
+        }
+        // Reset avatar cache
+        (0, avatarFetchCache_1.resetAvatarCache)(accountId, accountId);
+        return { success: true, avatarUrl: mediaUrl };
+    }
+    catch (err) {
+        Logger_1.default.error(`[TelegramUserListener] fetchSelfAvatar error: ${err.message}`);
+        return { success: false, error: err.message };
+    }
+}
+// ─── Group Management APIs ───────────────────────────────────────────────────
+function getClient(accountId) {
+    return activeListeners.get(accountId)?.client ?? null;
+}
+function ensureConnected(accountId) {
+    const listener = activeListeners.get(accountId);
+    if (!listener)
+        return { error: 'Tài khoản chưa kết nối' };
+    if (!listener.client)
+        return { error: 'Telegram client chưa khởi tạo' };
+    if (!listener.connected)
+        return { error: 'Tài khoản chưa kết nối' };
+    return { client: listener.client };
+}
+function getCachedTelegramProfile(accountId, userId) {
+    const db = DatabaseService_1.default.getInstance();
+    if (!db)
+        return null;
+    const peer = db.getTelegramPeer(accountId, userId);
+    const contact = db.queryOne(`SELECT display_name, avatar_url, phone FROM contacts
+     WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, [accountId, userId]);
+    const member = db.queryOne(`SELECT display_name, avatar FROM page_group_member
+     WHERE owner_zalo_id = ? AND member_id = ?
+     ORDER BY updated_at DESC LIMIT 1`, [accountId, userId]);
+    if (!peer && !contact && !member)
+        return null;
+    const displayName = peer?.display_name || contact?.display_name || member?.display_name || peer?.username || userId;
+    return {
+        id: userId,
+        firstName: displayName,
+        lastName: '',
+        displayName,
+        username: peer?.username || '',
+        phone: peer?.phone || contact?.phone || '',
+        bio: '',
+        commonChatsCount: 0,
+        status: '',
+        avatarUrl: peer?.avatar_url || contact?.avatar_url || member?.avatar || '',
+        isBot: false,
+        isVerified: false,
+        isPremium: false,
+        isScam: false,
+        isFake: false,
+        isRestricted: false,
+        isContact: false,
+        isMutualContact: false,
+        cached: true,
+    };
+}
+function getCachedTelegramGroupInfo(accountId, chatId) {
+    const db = DatabaseService_1.default.getInstance();
+    if (!db)
+        return null;
+    const peer = db.getTelegramPeer(accountId, chatId);
+    const contact = db.queryOne(`SELECT display_name, avatar_url, telegram_can_send, telegram_send_reason,
+            telegram_members_count, telegram_online_count, telegram_peer_type,
+            telegram_membership_state, telegram_join_action
+     FROM contacts
+     WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, [accountId, chatId]);
+    if (!peer && !contact)
+        return null;
+    return {
+        entity: {
+            id: chatId,
+            className: isChannelPeerType(peer?.peer_type) ? 'Channel' : 'Chat',
+            title: peer?.display_name || contact?.display_name || chatId,
+            username: peer?.username || '',
+            broadcast: peer?.peer_type === 'channel',
+            forum: peer?.peer_type === 'forum',
+        },
+        peerType: peer?.peer_type || 'basic_group',
+        full: {
+            participantsCount: Number(contact?.telegram_members_count || 0),
+            onlineCount: Number(contact?.telegram_online_count || 0),
+        },
+        memberCount: Number(contact?.telegram_members_count || 0),
+        onlineCount: Number(contact?.telegram_online_count || 0),
+        canSend: contact?.telegram_can_send == null ? undefined : contact.telegram_can_send === 1,
+        sendReason: contact?.telegram_send_reason || '',
+        membershipState: contact?.telegram_membership_state || 'member',
+        joinAction: contact?.telegram_join_action || 'none',
+        chats: [],
+        users: [],
+        avatarUrl: peer?.avatar_url || contact?.avatar_url || '',
+        cached: true,
+    };
+}
+function mapCachedTelegramGroupMembers(accountId, chatId) {
+    return (DatabaseService_1.default.getInstance()?.getGroupMembers(accountId, chatId) || []).map((member) => ({
+        id: String(member.member_id || ''),
+        firstName: member.display_name || '',
+        lastName: '',
+        username: '',
+        phone: '',
+        isBot: false,
+        status: '',
+        hasPhoto: !!member.avatar,
+        avatar: member.avatar || '',
+        role: Number(member.role || 0),
+        cached: true,
+    }));
+}
+/**
+ * Lấy thông tin nhóm (cả Basic Group và Supergroup/Channel)
+ */
+async function getGroupInfo(accountId, chatId) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn) {
+        // Try cached info first
+        const cachedInfo = getCachedTelegramGroupInfo(accountId, chatId);
+        if (cachedInfo)
+            return { success: true, info: cachedInfo };
+        // Try to build basic info from contacts DB
+        const db = DatabaseService_1.default.getInstance();
+        if (db) {
+            const contact = db.queryOne(`SELECT display_name, avatar_url, telegram_members_count, telegram_online_count, telegram_peer_type FROM contacts WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, [accountId, chatId]);
+            if (contact) {
+                return {
+                    success: true,
+                    info: {
+                        entity: { id: chatId, title: contact.display_name || chatId },
+                        peerType: contact.telegram_peer_type || 'basic_group',
+                        memberCount: Number(contact.telegram_members_count || 0),
+                        onlineCount: Number(contact.telegram_online_count || 0),
+                        avatarUrl: contact.avatar_url || '',
+                        membershipState: 'member',
+                        joinAction: 'none',
+                    },
+                };
+            }
+        }
+        return { success: false, error: conn.error };
+    }
+    try {
+        const { Api } = require('telegram');
+        const entity = await resolvePeerEntity(accountId, conn.client, chatId);
+        const peerType = entity ? getTelegramPeerType(entity) : await resolveChatPeerType(accountId, conn.client, chatId);
+        const isChannel = isChannelPeerType(peerType);
+        const full = isChannel
+            ? await conn.client.invoke(new Api.channels.GetFullChannel({ channel: await resolveInputChannel(accountId, conn.client, chatId) })).catch(() => null)
+            : await conn.client.invoke(new Api.messages.GetFullChat({ chatId: getBasicGroupId(chatId) }).catch(() => null));
+        if (entity) {
+            cacheTelegramPeer(accountId, chatId, entity);
+            persistTelegramDialogState(accountId, chatId, null, entity, full?.fullChat);
+        }
+        let avatarUrl = '';
+        const db = DatabaseService_1.default.getInstance();
+        const cached = db?.queryOne(`SELECT avatar_url FROM contacts WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, [accountId, chatId]);
+        avatarUrl = cached?.avatar_url || '';
+        if (!avatarUrl && entity) {
+            try {
+                const photo = await downloadProfilePhotoQueued(accountId, conn.client, entity, `group:${chatId}`, false);
+                if (photo && photo.length > 0) {
+                    const savedPath = await saveAvatarToDisk(Buffer.from(photo), `telegram_group_${chatId}_${Date.now()}.jpg`);
+                    if (savedPath) {
+                        const normalized = savedPath.replace(/\\/g, '/');
+                        avatarUrl = 'local-media://' + (normalized.startsWith('/') ? normalized : '/' + normalized);
+                        db?.run(`UPDATE contacts SET avatar_url = ? WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, [avatarUrl, accountId, chatId]);
+                    }
+                }
+            }
+            catch { }
+        }
+        const capability = getTelegramSendCapability(entity);
+        const membership = getTelegramMembership(entity);
+        const canManageTopics = !!entity?.creator || !!entity?.adminRights?.manageTopics;
+        return { success: true, info: {
+                entity, peerType, full: full?.fullChat, chats: full?.chats, users: full?.users, avatarUrl,
+                memberCount: Number(full?.fullChat?.participantsCount ?? entity?.participantsCount ?? 0),
+                onlineCount: Number(full?.fullChat?.onlineCount ?? 0),
+                canSend: capability.canSend, canManageTopics, sendReason: capability.reason,
+                membershipState: membership.state, joinAction: membership.action,
+            } };
+    }
+    catch (err) {
+        const cachedInfo = getCachedTelegramGroupInfo(accountId, chatId);
+        return cachedInfo ? { success: true, info: cachedInfo } : { success: false, error: err.message };
+    }
+}
+/**
+ * Lấy danh sách thành viên nhóm
+ */
+async function joinGroup(accountId, chatId) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        await conn.client.invoke(new Api.channels.JoinChannel({
+            channel: await resolveInputChannel(accountId, conn.client, chatId),
+        }));
+    }
+    catch (err) {
+        const message = String(err?.errorMessage || err?.message || err);
+        if (message.includes('INVITE_REQUEST_SENT')) {
+            DatabaseService_1.default.getInstance()?.run(`UPDATE contacts SET telegram_membership_state = 'pending', telegram_join_action = 'none',
+          telegram_can_send = 0, telegram_send_reason = ?, telegram_state_updated_at = ?
+         WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, ['Yêu cầu tham gia đang chờ quản trị viên duyệt', Date.now(), accountId, chatId]);
+            EventBroadcaster_1.default.emit('db:unreadChanged', { zaloId: accountId, source: 'telegram_membership_update' });
+            return { success: true, requested: true };
+        }
+        if (!message.includes('USER_ALREADY_PARTICIPANT')) {
+            const friendly = message.includes('CHANNEL_PRIVATE') || message.includes('USER_BANNED_IN_CHANNEL')
+                ? 'Bạn không thể tham gia nhóm/kênh này bằng tài khoản hiện tại'
+                : message;
+            return { success: false, error: friendly };
+        }
+    }
+    const info = await getGroupInfo(accountId, chatId);
+    DatabaseService_1.default.getInstance()?.run(`UPDATE contacts SET telegram_membership_state = 'member', telegram_join_action = 'none',
+      telegram_state_updated_at = ?
+     WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, [Date.now(), accountId, chatId]);
+    EventBroadcaster_1.default.emit('db:unreadChanged', { zaloId: accountId, source: 'telegram_membership_update' });
+    return { success: true, info: info.info };
+}
+async function getGroupMembers(accountId, chatId, limit = 200) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn) {
+        const cachedMembers = mapCachedTelegramGroupMembers(accountId, chatId);
+        return cachedMembers.length ? { success: true, members: cachedMembers } : { success: false, error: conn.error };
+    }
+    try {
+        const { Api } = require('telegram');
+        const peerType = await resolveChatPeerType(accountId, conn.client, chatId);
+        let participants = [];
+        const participantRoles = new Map();
+        if (isChannelPeerType(peerType)) {
+            const result = await conn.client.invoke(new Api.channels.GetParticipants({
+                channel: await resolveInputChannel(accountId, conn.client, chatId),
+                filter: new Api.ChannelParticipantsRecent(),
+                offset: 0,
+                limit,
+                hash: BigInt(0),
+            }));
+            if (result && 'users' in result) {
+                participants = result.users || [];
+                for (const participant of result.participants || []) {
+                    const memberId = String(participant.userId || participant.peer?.userId || '');
+                    if (!memberId)
+                        continue;
+                    const kind = participant.className || '';
+                    participantRoles.set(memberId, kind === 'ChannelParticipantCreator' ? 1 : kind === 'ChannelParticipantAdmin' ? 2 : 0);
+                }
+            }
+        }
+        else {
+            const fullChat = await conn.client.invoke(new Api.messages.GetFullChat({ chatId: getBasicGroupId(chatId) }));
+            participants = fullChat?.users || [];
+            for (const participant of fullChat?.fullChat?.participants?.participants || []) {
+                const memberId = String(participant.userId || '');
+                if (!memberId)
+                    continue;
+                const kind = participant.className || '';
+                participantRoles.set(memberId, kind === 'ChatParticipantCreator' ? 1 : kind === 'ChatParticipantAdmin' ? 2 : 0);
+            }
+        }
+        const db = DatabaseService_1.default.getInstance();
+        const cachedAvatars = new Map();
+        if (db) {
+            for (const row of db.query(`SELECT member_id, avatar FROM page_group_member WHERE owner_zalo_id = ? AND group_id = ?`, [accountId, chatId])) {
+                if (row?.member_id && row?.avatar)
+                    cachedAvatars.set(String(row.member_id), String(row.avatar));
+            }
+        }
+        // Members intentionally do not become conversation contacts (that creates
+        // phantom DMs). Return cached avatars immediately and hydrate the missing
+        // ones sequentially after this request has completed.
+        scheduleGroupMemberAvatarHydration(accountId, chatId, conn.client, participants, cachedAvatars, participantRoles);
+        const membersResult = participants.map((u) => {
+            const memberId = String(u.id);
+            cacheTelegramPeer(accountId, memberId, u);
+            return {
+                id: memberId,
+                firstName: u.firstName || '',
+                lastName: u.lastName || '',
+                username: u.username || '',
+                phone: u.phone || '',
+                isBot: u.bot || false,
+                ...getTelegramUserStatus(u),
+                hasPhoto: !!(u.photo && u.photo !== 'ChatPhotoEmpty'),
+                avatar: cachedAvatars.get(memberId) || '',
+                role: participantRoles.get(memberId) || 0,
+            };
+        });
+        db?.saveGroupMembers(accountId, chatId, membersResult.map((member) => ({
+            memberId: member.id,
+            displayName: [member.firstName, member.lastName].filter(Boolean).join(' ') || member.username || member.id,
+            avatar: member.avatar || '',
+            role: member.role || 0,
+        })));
+        return { success: true, members: membersResult };
+    }
+    catch (err) {
+        const cachedMembers = mapCachedTelegramGroupMembers(accountId, chatId);
+        return cachedMembers.length ? { success: true, members: cachedMembers } : { success: false, error: err.message };
+    }
+}
+/** Resolve exactly the senders referenced by visible/history messages. Recent
+ * participant lists are not authoritative for large groups, so using message
+ * IDs avoids leaving older senders as bare UIDs. */
+async function hydrateMessageSenders(accountId, chatId, messageIds, senderIds = []) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const ids = Array.from(new Set(messageIds.map(Number).filter(Number.isSafeInteger))).slice(0, 100);
+        const requestedSenderIds = Array.from(new Set(senderIds.map(String).filter(value => /^\d+$/.test(value)))).slice(0, 100);
+        if (!ids.length && !requestedSenderIds.length)
+            return { success: true, members: [] };
+        tgLog('info', accountId, 'history', 'MEMBER_HYDRATE_REQUEST', {
+            chatId, messageIds: ids.join(','), senderIds: requestedSenderIds.join(','),
+        });
+        const peer = ids.length ? await resolveInputPeer(accountId, conn.client, chatId) : null;
+        const messages = peer ? await conn.client.getMessages(peer, { ids }) : [];
+        const members = new Map();
+        const resolvedUsers = [];
+        const cachedAvatars = new Map();
+        const roles = new Map();
+        const addResolvedSender = async (senderId, entityHint) => {
+            if (!senderId || members.has(senderId))
+                return;
+            const sender = await hydrateTelegramIdentity(accountId, conn.client, senderId, chatId, entityHint);
+            if (!sender || sender.className !== 'User')
+                return;
+            const status = getTelegramUserStatus(sender);
+            const cached = DatabaseService_1.default.getInstance()?.queryOne(`SELECT avatar, role FROM page_group_member WHERE owner_zalo_id = ? AND group_id = ? AND member_id = ?`, [accountId, chatId, senderId]);
+            const member = {
+                id: senderId,
+                firstName: sender.firstName || '', lastName: sender.lastName || '',
+                username: sender.username || '', phone: sender.phone || '', isBot: !!sender.bot,
+                ...status, avatar: cached?.avatar || '', role: Number(cached?.role || 0),
+            };
+            members.set(senderId, member);
+            resolvedUsers.push(sender);
+            if (member.avatar)
+                cachedAvatars.set(senderId, member.avatar);
+            roles.set(senderId, member.role);
+            DatabaseService_1.default.getInstance()?.upsertGroupMember(accountId, chatId, {
+                memberId: senderId,
+                displayName: [member.firstName, member.lastName].filter(Boolean).join(' ') || member.username || senderId,
+                avatar: member.avatar, role: member.role,
+                username: member.username || '',
+            });
+        };
+        for (const message of messages) {
+            const senderId = getCanonicalChatId(message?.fromId)
+                || String(message?.senderId?.valueOf?.() || message?.fromId?.userId || '');
+            let sender = null;
+            try {
+                sender = await message.getSender?.();
+            }
+            catch { }
+            await addResolvedSender(senderId, sender);
+        }
+        // A visible bubble already carries its sender_id. Resolve that ID directly
+        // as a fallback because getMessages(ids) may return MessageEmpty for an old
+        // topic/channel item even though the peer registry can resolve the user.
+        for (const senderId of requestedSenderIds) {
+            await addResolvedSender(senderId);
+        }
+        scheduleGroupMemberAvatarHydration(accountId, chatId, conn.client, resolvedUsers, cachedAvatars, roles);
+        tgLog('info', accountId, 'history', 'MEMBER_HYDRATE_RESULT', {
+            chatId, requested: requestedSenderIds.length, resolved: members.size,
+            resolvedSenderIds: Array.from(members.keys()).join(','),
+        });
+        return { success: true, members: Array.from(members.values()) };
+    }
+    catch (err) {
+        tgLog('warn', accountId, 'history', 'MEMBER_HYDRATE_FAILED', {
+            chatId, senderIds: senderIds.join(','), error: err?.message || String(err),
+        });
+        return { success: false, error: err.message };
+    }
+}
+async function setDialogMute(accountId, chatId, muteUntil) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const peer = await resolveInputPeer(accountId, conn.client, chatId);
+        const normalizedUntil = Math.max(0, Math.min(2147483647, Math.floor(Number(muteUntil || 0))));
+        await conn.client.invoke(new Api.account.UpdateNotifySettings({
+            peer: new Api.InputNotifyPeer({ peer }),
+            settings: new Api.InputPeerNotifySettings({ muteUntil: normalizedUntil }),
+        }));
+        const foreverMuted = normalizedUntil >= 2147483647;
+        const muteUntilMs = normalizedUntil > 0 && !foreverMuted ? normalizedUntil * 1000 : 0;
+        DatabaseService_1.default.getInstance()?.run(`UPDATE contacts SET is_muted = ?, mute_until = ?, telegram_state_updated_at = ?
+       WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, [foreverMuted ? 1 : 0, muteUntilMs, Date.now(), accountId, chatId]);
+        EventBroadcaster_1.default.emit('db:unreadChanged', { zaloId: accountId, source: 'telegram_dialog_state' });
+        return { success: true, muteUntil: normalizedUntil };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+async function setDialogArchived(accountId, chatId, archived) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const peer = await resolveInputPeer(accountId, conn.client, chatId);
+        const folderId = archived ? 1 : 0;
+        await conn.client.invoke(new Api.folders.EditPeerFolders({
+            folderPeers: [new Api.InputFolderPeer({ peer, folderId })],
+        }));
+        DatabaseService_1.default.getInstance()?.run(`UPDATE contacts SET telegram_folder_id = ?, telegram_archived = ?, is_in_others = ?, telegram_state_updated_at = ?
+       WHERE owner_zalo_id = ? AND contact_id = ? AND channel = 'telegram_user'`, [folderId, archived ? 1 : 0, archived ? 1 : 0, Date.now(), accountId, chatId]);
+        EventBroadcaster_1.default.emit('db:unreadChanged', { zaloId: accountId, source: 'telegram_dialog_state' });
+        return { success: true, folderId };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Ghim/bỏ ghim hội thoại trên Telegram.
+ */
+async function setDialogPin(accountId, chatId, pinned) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const peer = await resolveInputPeer(accountId, conn.client, chatId);
+        await conn.client.invoke(new Api.messages.ToggleDialogPin({
+            pinned,
+            peer: new Api.InputDialogPeer({ peer }),
+        }));
+        EventBroadcaster_1.default.emit('db:unreadChanged', { zaloId: accountId, source: 'telegram_pin' });
+        return { success: true };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Lấy danh sách người đã thả cảm xúc cho một tin nhắn.
+ * Sử dụng messages.GetMessageReactionsList API của Telegram.
+ */
+async function getMessageReactions(accountId, chatId, messageId, reaction, offset, limit = 50) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const peer = await resolveInputPeer(accountId, conn.client, chatId);
+        const reactionObj = reaction ? new Api.ReactionEmoji({ emoticon: reaction }) : undefined;
+        const result = await conn.client.invoke(new Api.messages.GetMessageReactionsList({
+            peer,
+            id: Number(messageId),
+            reaction: reactionObj,
+            offset: offset || '',
+            limit,
+        }));
+        const reactions = (result.reactions || []).map((r) => ({
+            userId: getCanonicalChatId(r.peerId) || String(r.peerId?.userId || ''),
+            emoji: getReactionEmoji(r.reaction),
+            date: r.date || 0,
+        }));
+        return {
+            success: true,
+            reactions,
+            count: result.count || 0,
+            nextOffset: result.nextOffset || '',
+        };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+function getReactionEmoji(reaction) {
+    if (!reaction)
+        return '';
+    if (reaction.className === 'ReactionEmoji')
+        return reaction.emoticon || '';
+    if (reaction.className === 'ReactionCustomEmoji')
+        return '⭐';
+    return '';
+}
+/** Load Telegram's user surface on demand. Phone is only returned when the
+ * account is permitted to see it by Telegram's privacy rules. */
+async function getUserProfile(accountId, userId, chatId) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn) {
+        const cachedProfile = getCachedTelegramProfile(accountId, userId);
+        return cachedProfile ? { success: true, profile: cachedProfile } : { success: false, error: conn.error };
+    }
+    try {
+        const { Api } = require('telegram');
+        const entity = await resolvePeerEntity(accountId, conn.client, userId);
+        const peerType = entity ? getTelegramPeerType(entity) : await resolveChatPeerType(accountId, conn.client, userId);
+        if (peerType !== 'user')
+            return { success: false, error: 'Đây không phải tài khoản người dùng Telegram' };
+        let full = null;
+        let user = entity; // Default to entity (has bot flag from resolvePeerEntity)
+        try {
+            // Build InputUser from entity accessHash — avoids resolveInputUser which fails for large IDs
+            const accessHash = entity?.accessHash;
+            if (accessHash) {
+                const inputUser = new Api.InputUser({ userId: BigInt(String(userId)), accessHash: BigInt(String(accessHash)) });
+                full = await conn.client.invoke(new Api.users.GetFullUser({ id: inputUser }));
+                const rawUserId = String(userId).replace(/^-/, '');
+                user = full?.users?.find((item) => String(item?.id) === rawUserId) || entity || full?.users?.[0] || {};
+            }
+        }
+        catch {
+            // GetFullUser may fail — fallback to entity
+        }
+        let avatarUrl = '';
+        try {
+            const photo = await downloadProfilePhotoQueued(accountId, conn.client, user, `profile:${userId}`, false);
+            if (photo?.length) {
+                const savedPath = await saveAvatarToDisk(Buffer.from(photo), `tg_profile_${userId}_${Date.now()}.jpg`);
+                if (savedPath) {
+                    const normalized = savedPath.replace(/\\/g, '/');
+                    avatarUrl = 'local-media://' + (normalized.startsWith('/') ? normalized : '/' + normalized);
+                }
+            }
+        }
+        catch { }
+        const fullUser = full?.fullUser || {};
+        const profile = {
+            id: String(user.id || userId),
+            firstName: user.firstName || '', lastName: user.lastName || '',
+            displayName: [user.firstName, user.lastName].filter(Boolean).join(' ') || user.username || String(user.id || userId),
+            username: user.username || '', phone: user.phone || '', bio: fullUser.about || '',
+            commonChatsCount: Number(fullUser.commonChatsCount || 0),
+            status: user.status?.className || '', avatarUrl,
+            isBot: !!(user.bot || entity?.bot || full?.users?.[0]?.bot), isVerified: !!user.verified, isPremium: !!user.premium,
+            isScam: !!user.scam, isFake: !!user.fake, isRestricted: !!user.restricted,
+            isContact: !!user.contact, isMutualContact: !!user.mutualContact,
+            menuButton: (() => {
+                const botInfo = full?.fullUser?.botInfo;
+                if (!botInfo?.menuButton)
+                    return null;
+                const mb = botInfo.menuButton;
+                if (mb.className === 'BotMenuButtonCommands')
+                    return { type: 'commands' };
+                if (mb.className === 'BotMenuButton')
+                    return { type: 'custom', text: mb.text || '', url: mb.url || '' };
+                return { type: 'default' };
+            })(),
+            hasMainApp: !!(full?.fullUser?.botInfo?.appSettings),
+        };
+        if (chatId && String(chatId) !== String(userId)) {
+            const db = DatabaseService_1.default.getInstance();
+            const existing = db?.queryOne(`SELECT avatar, role FROM page_group_member
+         WHERE owner_zalo_id = ? AND group_id = ? AND member_id = ?`, [accountId, chatId, String(profile.id)]);
+            const memberAvatar = avatarUrl || existing?.avatar || '';
+            db?.upsertGroupMember(accountId, chatId, {
+                memberId: String(profile.id), displayName: profile.displayName,
+                avatar: memberAvatar, role: Number(existing?.role || 0),
+                username: profile.username || '',
+            });
+            EventBroadcaster_1.default.emit('event:telegramEntityHydrated', {
+                zaloId: accountId, threadId: chatId, userId: String(profile.id),
+                displayName: profile.displayName, username: profile.username,
+                avatar: memberAvatar, ...getTelegramUserStatus(user),
+            });
+            if (memberAvatar) {
+                EventBroadcaster_1.default.emit('event:groupMemberAvatar', {
+                    zaloId: accountId, groupId: chatId, memberId: String(profile.id),
+                    displayName: profile.displayName, avatar: memberAvatar,
+                });
+            }
+            tgLog('info', accountId, 'history', 'MEMBER_PROFILE_APPLIED', {
+                chatId, memberId: String(profile.id), hasAvatar: !!memberAvatar,
+            });
+        }
+        return {
+            success: true,
+            profile,
+        };
+    }
+    catch (err) {
+        const cachedProfile = getCachedTelegramProfile(accountId, userId);
+        return cachedProfile ? { success: true, profile: cachedProfile } : { success: false, error: err.message };
+    }
+}
+/**
+ * Resolve a @username to a Telegram peer.
+ * Caches the result in the peer registry.
+ */
+async function resolveUsername(accountId, username) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const cleanUsername = username.replace(/^@/, '');
+        if (!cleanUsername)
+            return { success: false, error: 'Username không hợp lệ' };
+        const result = await conn.client.invoke(new Api.contacts.ResolveUsername({ username: cleanUsername }));
+        const users = result.users || [];
+        const chats = result.chats || [];
+        // Cache all resolved entities
+        for (const user of users) {
+            if (user?.id)
+                cacheTelegramPeer(accountId, String(user.id), user);
+        }
+        for (const chat of chats) {
+            if (chat?.id) {
+                const chatId = getCanonicalChatId(chat);
+                cacheTelegramPeer(accountId, chatId, chat);
+            }
+        }
+        // Return the primary resolved peer
+        const primary = users[0] || chats[0];
+        if (!primary)
+            return { success: false, error: `Không tìm thấy @${cleanUsername}` };
+        const peerId = primary.className === 'User' ? String(primary.id) : getCanonicalChatId(primary);
+        return {
+            success: true,
+            peer: {
+                peerId,
+                peerType: getTelegramPeerType(primary),
+                displayName: primary.firstName
+                    ? [primary.firstName, primary.lastName].filter(Boolean).join(' ')
+                    : primary.title || primary.username || '',
+                username: primary.username || '',
+                phone: primary.phone || '',
+            },
+        };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Search cached Telegram peers by name, username, or phone.
+ * This queries the local peer registry, not the Telegram API.
+ */
+function searchContacts(accountId, query) {
+    try {
+        const db = DatabaseService_1.default.getInstance();
+        if (!db)
+            return { success: false, error: 'Database not available' };
+        const like = `%${query}%`;
+        const peers = db.query(`SELECT peer_id, peer_type, access_hash, username, display_name, phone, avatar_url
+       FROM telegram_peers
+       WHERE owner_zalo_id = ?
+         AND (display_name LIKE ? OR username LIKE ? OR phone LIKE ?)
+       ORDER BY display_name
+       LIMIT 50`, [accountId, like, like, like]);
+        return { success: true, peers: peers || [] };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * List all cached Telegram peers for an account.
+ * Optionally filter by peer type.
+ */
+function getPeers(accountId, peerType) {
+    try {
+        const db = DatabaseService_1.default.getInstance();
+        if (!db)
+            return { success: false, error: 'Database not available' };
+        let sql = `SELECT peer_id, peer_type, access_hash, username, display_name, phone, avatar_url
+               FROM telegram_peers WHERE owner_zalo_id = ?`;
+        const params = [accountId];
+        if (peerType) {
+            sql += ` AND peer_type = ?`;
+            params.push(peerType);
+        }
+        sql += ` ORDER BY display_name LIMIT 500`;
+        const peers = db.query(sql, params);
+        return { success: true, peers: peers || [] };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Thêm thành viên vào nhóm
+ */
+async function addChatUser(accountId, chatId, userId) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const peerType = await resolveChatPeerType(accountId, conn.client, chatId);
+        const user = await resolveInputUser(accountId, conn.client, userId);
+        if (isChannelPeerType(peerType)) {
+            await conn.client.invoke(new Api.channels.InviteToChannel({ channel: await resolveInputChannel(accountId, conn.client, chatId), users: [user] }));
+        }
+        else {
+            await conn.client.invoke(new Api.messages.AddChatUser({ chatId: getBasicGroupId(chatId), userId: user, fwdLimit: 0 }));
+        }
+        return { success: true };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Xóa/rời thành viên khỏi nhóm
+ */
+async function deleteChatUser(accountId, chatId, userId, revokeHistory = false) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const peerType = await resolveChatPeerType(accountId, conn.client, chatId);
+        if (isChannelPeerType(peerType)) {
+            // userId = 'self' → leave
+            if (userId === 'self' || userId === accountId) {
+                await conn.client.invoke(new Api.channels.LeaveChannel({ channel: await resolveInputChannel(accountId, conn.client, chatId) }));
+            }
+            else {
+                const user = await resolveInputPeer(accountId, conn.client, userId);
+                await conn.client.invoke(new Api.channels.EditBanned({
+                    channel: await resolveInputChannel(accountId, conn.client, chatId),
+                    participant: user,
+                    bannedRights: new Api.ChatBannedRights({
+                        untilDate: 0,
+                        viewMessages: true,
+                        sendMessages: true,
+                        sendMedia: true,
+                        sendStickers: true,
+                        sendGifs: true,
+                        sendGames: true,
+                        sendInline: true,
+                        sendPolls: true,
+                        changeInfo: true,
+                        inviteUsers: true,
+                        pinMessages: true,
+                    }),
+                }));
+            }
+        }
+        else {
+            if (userId === 'self' || userId === accountId) {
+                await conn.client.invoke(new Api.messages.DeleteChatUser({ chatId: getBasicGroupId(chatId), userId: new Api.InputUserSelf() }));
+            }
+            else {
+                const user = await resolveInputUser(accountId, conn.client, userId);
+                await conn.client.invoke(new Api.messages.DeleteChatUser({ chatId: getBasicGroupId(chatId), userId: user, revokeHistory }));
+            }
+        }
+        return { success: true };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Đổi tên nhóm
+ */
+async function editChatTitle(accountId, chatId, title) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const peerType = await resolveChatPeerType(accountId, conn.client, chatId);
+        if (isChannelPeerType(peerType)) {
+            await conn.client.invoke(new Api.channels.EditTitle({ channel: await resolveInputChannel(accountId, conn.client, chatId), title }));
+        }
+        else {
+            await conn.client.invoke(new Api.messages.EditChatTitle({ chatId: getBasicGroupId(chatId), title }));
+        }
+        return { success: true };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Đổi ảnh đại diện nhóm
+ */
+async function editChatPhoto(accountId, chatId, photoPath) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const fs = require('fs');
+        const peerType = await resolveChatPeerType(accountId, conn.client, chatId);
+        const buffer = fs.readFileSync(photoPath);
+        // GramJS uploadFile expects CustomFile, not raw Buffer
+        const { CustomFile } = require('telegram/client/uploads');
+        const customFile = new CustomFile(require('path').basename(photoPath), buffer.length, '', buffer);
+        const file = await conn.client.uploadFile({ file: customFile, workers: 1 });
+        const inputFile = 'id' in file
+            ? new Api.InputFileUploaded({ id: file.id, parts: file.parts, md5Checksum: Buffer.alloc(0) })
+            : file;
+        if (isChannelPeerType(peerType)) {
+            await conn.client.invoke(new Api.channels.EditPhoto({ channel: await resolveInputChannel(accountId, conn.client, chatId), photo: inputFile }));
+        }
+        else {
+            await conn.client.invoke(new Api.messages.EditChatPhoto({ chatId: getBasicGroupId(chatId), photo: inputFile }));
+        }
+        return { success: true };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Cấp/thu quyền admin
+ */
+async function editChatAdmin(accountId, chatId, userId, isAdmin) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const peerType = await resolveChatPeerType(accountId, conn.client, chatId);
+        const user = await resolveInputUser(accountId, conn.client, userId);
+        if (isChannelPeerType(peerType)) {
+            const adminRights = isAdmin ? new Api.ChatAdminRights({
+                changeInfo: true, postMessages: true, editMessages: true,
+                deleteMessages: true, banUsers: true, inviteUsers: true,
+                pinMessages: true, addAdmins: true, anonymous: false,
+                manageCall: true, other: true,
+            }) : new Api.ChatAdminRights({
+                changeInfo: false, postMessages: false, editMessages: false,
+                deleteMessages: false, banUsers: false, inviteUsers: false,
+                pinMessages: false, addAdmins: false, anonymous: false,
+                manageCall: false, other: false,
+            });
+            await conn.client.invoke(new Api.channels.EditAdmin({ channel: await resolveInputChannel(accountId, conn.client, chatId), participant: user, adminRights }));
+        }
+        else {
+            await conn.client.invoke(new Api.messages.EditChatAdmin({ chatId: getBasicGroupId(chatId), userId: user, isAdmin }));
+        }
+        return { success: true };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Rời nhóm (convenience wrapper)
+ */
+async function leaveChat(accountId, chatId) {
+    return deleteChatUser(accountId, chatId, 'self');
+}
+/**
+ * Block a Telegram user.
+ */
+async function blockUser(accountId, userId) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const user = await resolveInputUser(accountId, conn.client, userId);
+        await conn.client.invoke(new Api.contacts.Block({ id: user }));
+        return { success: true };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Unblock a Telegram user.
+ */
+async function unblockUser(accountId, userId) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const user = await resolveInputUser(accountId, conn.client, userId);
+        await conn.client.invoke(new Api.contacts.Unblock({ id: user }));
+        return { success: true };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Lấy link mời nhóm
+ */
+async function exportChatInvite(accountId, chatId) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const peerType = await resolveChatPeerType(accountId, conn.client, chatId);
+        const peer = await resolveInputPeer(accountId, conn.client, chatId);
+        let result;
+        if (isChannelPeerType(peerType)) {
+            result = await conn.client.invoke(new Api.messages.ExportChatInvite({ peer, legacyRevokePermanent: false }));
+        }
+        else {
+            result = await conn.client.invoke(new Api.messages.ExportChatInvite({ peer }));
+        }
+        const link = result?.link || result?.result?.link || '';
+        return { success: true, link };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Đánh dấu đã đọc nhóm
+ */
+async function readChatHistory(accountId, chatId) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const peerType = await resolveChatPeerType(accountId, conn.client, chatId);
+        if (isChannelPeerType(peerType)) {
+            await conn.client.invoke(new Api.channels.ReadHistory({ channel: await resolveInputChannel(accountId, conn.client, chatId) }));
+        }
+        else {
+            await conn.client.invoke(new Api.messages.ReadHistory({ peer: await resolveInputPeer(accountId, conn.client, chatId) }));
+        }
+        return { success: true };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Đánh dấu đã đọc 1 forum topic cụ thể
+ * Forum topic = discussion thread, dùng messages.ReadDiscussion
+ * msg_id = topic root message ID
+ * read_max_id = max message ID cần mark read (dùng top_message từ ForumTopic nếu có)
+ */
+async function readForumTopic(accountId, chatId, topMsgId, readMaxId) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const peer = await resolveInputPeer(accountId, conn.client, chatId);
+        // read_max_id: nếu không có → dùng INT32_MAX để mark toàn bộ topic
+        const maxId = readMaxId ? Number(readMaxId) : 0x7FFFFFFF;
+        Logger_1.default.log(`[TelegramUserListener] readForumTopic: chatId=${chatId} topMsgId=${topMsgId} readMaxId=${maxId}`);
+        await conn.client.invoke(new Api.messages.ReadDiscussion({
+            peer,
+            msgId: Number(topMsgId),
+            readMaxId: maxId,
+        }));
+        return { success: true };
+    }
+    catch (err) {
+        Logger_1.default.warn(`[TelegramUserListener] readForumTopic failed: ${err.message}`);
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Lấy thông tin đầy đủ nhóm (full chat info)
+ */
+async function getFullChat(accountId, chatId) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const peerType = await resolveChatPeerType(accountId, conn.client, chatId);
+        let full;
+        if (isChannelPeerType(peerType)) {
+            full = await conn.client.invoke(new Api.channels.GetFullChannel({ channel: await resolveInputChannel(accountId, conn.client, chatId) }));
+        }
+        else {
+            full = await conn.client.invoke(new Api.messages.GetFullChat({ chatId: getBasicGroupId(chatId) }));
+        }
+        return { success: true, info: full };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+// ─── Forum / Topics APIs ─────────────────────────────────────────────────────
+/** In-memory cache: accountId + chatId → isForum (loaded from DB or API) */
+const forumMemCache = new Map();
+const memberAvatarHydrationJobs = new Map();
+const latestTopicMessageRequests = new Map();
+/** Queue media-photo downloads per group. Parallel GramJS exported senders can
+ * tear down the main MTProto connection on unstable networks. */
+function scheduleGroupMemberAvatarHydration(accountId, chatId, client, participants, cachedAvatars, roles) {
+    const key = `${accountId}_${chatId}`;
+    const targets = participants.filter((user) => user?.id && user?.photo && user.photo !== 'ChatPhotoEmpty' && !cachedAvatars.has(String(user.id)));
+    if (!targets.length)
+        return;
+    let job = memberAvatarHydrationJobs.get(key);
+    if (!job) {
+        job = { client, users: new Map(), roles: new Map(), running: false };
+        memberAvatarHydrationJobs.set(key, job);
+    }
+    job.client = client;
+    for (const user of targets) {
+        const memberId = String(user.id);
+        job.users.set(memberId, user);
+        job.roles.set(memberId, roles.get(memberId) || job.roles.get(memberId) || 0);
+    }
+    if (job.running)
+        return;
+    job.running = true;
+    setTimeout(() => {
+        void (async () => {
+            const db = DatabaseService_1.default.getInstance();
+            try {
+                while (job.users.size > 0) {
+                    const next = job.users.entries().next().value;
+                    if (!next)
+                        break;
+                    const [memberId, user] = next;
+                    job.users.delete(memberId);
+                    try {
+                        const existing = db?.queryOne(`SELECT avatar FROM page_group_member
+               WHERE owner_zalo_id = ? AND group_id = ? AND member_id = ?`, [accountId, chatId, memberId]);
+                        if (existing?.avatar)
+                            continue;
+                        const photo = await downloadProfilePhotoQueued(accountId, job.client, user, `member:${chatId}:${memberId}`, false);
+                        if (!photo?.length)
+                            continue;
+                        const savedPath = await saveAvatarToDisk(Buffer.from(photo), `tg_member_${memberId}_${Date.now()}.jpg`);
+                        if (!savedPath)
+                            continue;
+                        const normalized = savedPath.replace(/\\/g, '/');
+                        const avatar = 'local-media://' + (normalized.startsWith('/') ? normalized : '/' + normalized);
+                        db?.upsertGroupMember(accountId, chatId, {
+                            memberId,
+                            displayName: [user.firstName, user.lastName].filter(Boolean).join(' ') || user.username || '',
+                            avatar,
+                            role: job.roles.get(memberId) || 0,
+                            username: user.username || '',
+                        });
+                        EventBroadcaster_1.default.emit('event:groupMemberAvatar', {
+                            zaloId: accountId, groupId: chatId, memberId,
+                            displayName: [user.firstName, user.lastName].filter(Boolean).join(' ') || user.username || memberId,
+                            avatar,
+                        });
+                        tgLog('info', accountId, 'history', 'MEMBER_AVATAR_HYDRATED', { chatId, memberId });
+                    }
+                    catch (err) {
+                        tgLog('warn', accountId, 'history', 'MEMBER_AVATAR_FAILED', {
+                            chatId, memberId, error: err?.message || String(err),
+                        });
+                    }
+                    await new Promise(resolve => setTimeout(resolve, 350));
+                }
+            }
+            finally {
+                job.running = false;
+                if (job.users.size === 0)
+                    memberAvatarHydrationJobs.delete(key);
+                else
+                    scheduleGroupMemberAvatarHydration(accountId, chatId, job.client, [...job.users.values()], new Map(), job.roles);
+            }
+        })();
+    }, 1000);
+}
+/**
+ * Kiểm tra supergroup có phải forum không.
+ * Flow: memory cache → DB → API → save to DB + cache
+ *
+ * @param forceApi Bắt buộc gọi API (bỏ qua cache)
+ */
+async function isForum(accountId, chatId, forceApi = false) {
+    // The renderer calls isForum when a conversation is opened. Reuse that
+    // existing signal as the active-peer short-poll lease; background probes use
+    // forceApi=true and therefore do not consume the 10-peer lease budget.
+    if (!forceApi)
+        touchActiveChannel(accountId, chatId);
+    const cacheKey = getForumCacheKey(accountId, chatId);
+    const db = DatabaseService_1.default.getInstance();
+    // telegram_peers is populated directly from Telegram Channel entities and
+    // is more reliable than the denormalized contacts.is_forum flag. In
+    // particular, a cold GetFullChannel response previously overwrote valid
+    // forums with false. Heal the contact row before any forced API probe.
+    if (db?.getTelegramPeer(accountId, chatId)?.peer_type === 'forum') {
+        forumMemCache.set(cacheKey, true);
+        db.setIsForum(accountId, chatId, true);
+        touchActiveChannel(accountId, chatId);
+        return { success: true, isForum: true };
+    }
+    // 1. Memory cache
+    if (!forceApi && forumMemCache.get(cacheKey) === true) {
+        return { success: true, isForum: true };
+    }
+    // 2. DB cache
+    if (!forceApi) {
+        if (db) {
+            const dbVal = db.getIsForum(accountId, chatId);
+            if (dbVal === 1) {
+                forumMemCache.set(cacheKey, true);
+                return { success: true, isForum: true };
+            }
+            // A historical `false` can be stale (for example a cold entity cache
+            // during an earlier check). Never let it permanently hide a forum.
+        }
+    }
+    // 3. API call (with timeout)
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout')), ms))]);
+        let isForumResult = false;
+        const entity = await withTimeout(resolvePeerEntity(accountId, conn.client, chatId), 5000);
+        const peerType = entity ? getTelegramPeerType(entity) : await resolveChatPeerType(accountId, conn.client, chatId);
+        if (!isChannelPeerType(peerType)) {
+            isForumResult = false;
+        }
+        else {
+            // `forum` belongs to Channel. ChannelFull is a compatibility fallback
+            // for peers restored from the durable registry after a process restart.
+            isForumResult = !!entity?.forum || peerType === 'forum';
+            const full = await withTimeout(conn.client.invoke(new Api.channels.GetFullChannel({
+                channel: await resolveInputChannel(accountId, conn.client, chatId),
+            })), 5000);
+            isForumResult = isForumResult || !!(full?.fullChat?.forum);
+            // ChannelFull.pts is a snapshot of *now*, not a recovery cursor. Never
+            // write it here: opening the forum details during an offline gap would
+            // otherwise advance PTS past messages that getChannelDifference must read.
+        }
+        // 4. Save to DB + memory cache
+        forumMemCache.set(cacheKey, isForumResult);
+        if (db) {
+            db.setIsForum(accountId, chatId, isForumResult);
+        }
+        Logger_1.default.log(`[TelegramUserListener] isForum(${chatId}): forum=${isForumResult} (from API)`);
+        touchActiveChannel(accountId, chatId);
+        return { success: true, isForum: isForumResult };
+    }
+    catch (err) {
+        Logger_1.default.warn(`[TelegramUserListener] isForum(${chatId}) error: ${err.message}`);
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Check isForum cho tất cả group contacts chưa check (background).
+ * Gọi khi app khởi động hoặc khi có group mới.
+ */
+async function checkForumForNewGroups(accountId) {
+    const db = DatabaseService_1.default.getInstance();
+    if (!db)
+        return;
+    const groups = db.query(`SELECT contact_id FROM contacts WHERE owner_zalo_id = ? AND contact_type = 'group' AND channel = 'telegram_user' AND is_forum IS NULL`, [accountId]);
+    if (groups.length === 0)
+        return;
+    Logger_1.default.log(`[TelegramUserListener] Checking isForum for ${groups.length} unchecked groups...`);
+    for (const g of groups) {
+        try {
+            await isForum(accountId, g.contact_id, true);
+        }
+        catch { }
+        // Throttle: 500ms giữa mỗi check
+        await new Promise(r => setTimeout(r, 500));
+    }
+}
+/**
+ * Lấy danh sách topics của forum group
+ */
+async function getForumTopics(accountId, chatId) {
+    touchActiveChannel(accountId, chatId);
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    const { Api } = require('telegram');
+    // Guard: basic groups (negative IDs without -100 prefix) are NOT channels/supergroups.
+    // channels.GetForumTopics requires a supergroup. Basic groups cannot have forums.
+    const numericId = String(chatId);
+    if (numericId.startsWith('-') && !numericId.startsWith('-100')) {
+        return { success: false, error: 'Forum topics are only available for supergroups' };
+    }
+    // Try up to 2 times: first attempt with current entity, second after forcing entity refresh.
+    // This handles stale access hashes after reconnect or long idle.
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            const channelInput = await resolveInputChannel(accountId, conn.client, chatId);
+            const result = await conn.client.invoke(new Api.channels.GetForumTopics({
+                channel: channelInput,
+                offsetDate: 0,
+                offsetId: 0,
+                offsetTopic: 0,
+                limit: 100,
+                hash: BigInt(0),
+            }));
+            const topics = result?.topics || [];
+            const users = result?.users || [];
+            const userMap = new Map(users.map((u) => [String(u.id), u]));
+            const mappedTopics = topics.map((t) => ({
+                // ForumTopic.id is the topic/thread root. topMessage is only the latest
+                // message currently present in that topic.
+                id: String(t.id || ''),
+                forumTopicId: String(t.id || ''),
+                title: t.title || '',
+                iconEmojiId: t.iconEmojiId ? String(t.iconEmojiId) : '',
+                iconColor: t.iconColor || 0,
+                rootMessageId: String(t.id || ''),
+                topMessageId: String(t.topMessage || ''), // compatibility for current UI
+                topMessageDate: t.date || 0,
+                unreadCount: t.unreadCount || 0,
+                isPinned: !!t.pinned,
+                isClosed: !!t.closed,
+                isShort: !!t.short,
+                creatorId: String(t.fromId?.userId || ''),
+                creatorName: (() => {
+                    const uid = String(t.fromId?.userId || '');
+                    const u = userMap.get(uid);
+                    return u ? [u.firstName, u.lastName].filter(Boolean).join(' ') : '';
+                })(),
+            }));
+            tgLog('info', accountId, 'topic_api', `TOPICS_RECEIVED for ${chatId}`, {
+                count: topics.length,
+                // Keep both IDs visible while diagnosing topic routing. Telegram's
+                // ForumTopic.id and ForumTopic.topMessage have different semantics.
+                ids: topics.slice(0, 20).map((topic) => `${String(topic.id || '-')}:${String(topic.topMessage || '-')}`).join(','),
+            });
+            return { success: true, topics: mappedTopics };
+        }
+        catch (err) {
+            const errMsg = err.message || String(err);
+            // CHANNEL_INVALID on first attempt — try to force refresh entity cache and retry
+            if (errMsg.includes('CHANNEL_INVALID') && attempt === 0) {
+                Logger_1.default.warn(`[TelegramUserListener] getForumTopics: CHANNEL_INVALID for ${chatId} on attempt 1 — refreshing entity cache`);
+                try {
+                    // Force GramJS to populate its entity cache by fetching dialogs
+                    await conn.client.getDialogs({ limit: 100 });
+                    // Also try to explicitly resolve the entity
+                    await resolvePeerEntity(accountId, conn.client, chatId);
+                }
+                catch (refreshErr) {
+                    Logger_1.default.warn(`[TelegramUserListener] Entity refresh failed: ${refreshErr.message}`);
+                }
+                continue; // retry with refreshed entity
+            }
+            if (errMsg.includes('CHANNEL_INVALID')) {
+                Logger_1.default.warn(`[TelegramUserListener] getForumTopics: CHANNEL_INVALID for ${chatId} after retry`);
+                return { success: false, error: 'CHANNEL_INVALID: Nhóm này không phải supergroup hoặc access hash đã hết hạn' };
+            }
+            return { success: false, error: errMsg };
+        }
+    }
+    return { success: false, error: 'CHANNEL_INVALID' };
+}
+/**
+ * Lấy messages của 1 topic cụ thể
+ */
+async function getForumTopicMessages(accountId, chatId, rootMessageId, limit = 50) {
+    touchActiveChannel(accountId, chatId);
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    const requestKey = `${accountId}:${chatId}`;
+    const requestToken = Symbol(rootMessageId);
+    latestTopicMessageRequests.set(requestKey, requestToken);
+    // Topic clicks can arrive in a burst. Let the latest selection win before
+    // invoking GetReplies; stale calls were causing avoidable FLOOD_WAIT sleeps.
+    await new Promise(resolve => setTimeout(resolve, 200));
+    if (latestTopicMessageRequests.get(requestKey) !== requestToken) {
+        return { success: false, error: 'REQUEST_SUPERSEDED' };
+    }
+    try {
+        const { Api } = require('telegram');
+        tgLog('info', accountId, 'topic_api', 'TOPIC_MESSAGES_REQUEST', {
+            chatId,
+            requestedId: rootMessageId,
+            limit,
+        });
+        // messages.getReplies expects the immutable ForumTopic.id/root message.
+        const result = await conn.client.invoke(new Api.messages.GetReplies({
+            peer: await resolveInputPeer(accountId, conn.client, chatId),
+            msgId: Number(rootMessageId),
+            offsetId: 0,
+            offsetDate: 0,
+            addOffset: 0,
+            limit,
+            maxId: 0,
+            minId: 0,
+            hash: BigInt(0),
+        }));
+        const messages = result?.messages || [];
+        tgLog('info', accountId, 'topic_api', 'TOPIC_MESSAGES_RESPONSE', {
+            chatId,
+            requestedId: rootMessageId,
+            count: messages.length,
+            firstMsgId: messages[0]?.id != null ? String(messages[0].id) : '-',
+        });
+        const users = result?.users || [];
+        const userMap = new Map(users.map((u) => [String(u.id), u]));
+        for (const user of users) {
+            const userId = String(user.id || '');
+            if (!userId)
+                continue;
+            cacheTelegramPeer(accountId, userId, user);
+            const displayName = [user.firstName, user.lastName].filter(Boolean).join(' ') || user.username || userId;
+            DatabaseService_1.default.getInstance()?.upsertGroupMember(accountId, chatId, {
+                memberId: userId, displayName, avatar: '', role: 0,
+                username: user.username || '',
+            });
+        }
+        const cachedPeerType = DatabaseService_1.default.getInstance()?.getTelegramPeer(accountId, chatId)?.peer_type;
+        const rawMessageById = new Map(messages.map((message) => [String(message.id), message]));
+        const mappedMessages = messages.map((m) => {
+            const normalized = normalizeTelegramMessageMedia(m, cachedPeerType);
+            const replyToId = getTelegramReplyToMessageId(m);
+            let quoteData;
+            const original = replyToId ? rawMessageById.get(replyToId) : undefined;
+            if (original) {
+                const originalNormalized = normalizeTelegramMessageMedia(original, cachedPeerType);
+                quoteData = buildTelegramQuoteData({
+                    msgId: replyToId,
+                    content: originalNormalized.content,
+                    msgType: originalNormalized.msgType,
+                    senderId: String(original.senderId?.valueOf() || ''),
+                    attachments: originalNormalized.attachments,
+                });
+            }
+            return {
+                id: String(m.id),
+                text: normalized.content,
+                date: m.date || 0,
+                senderId: String(m.fromId?.userId || ''),
+                senderName: (() => {
+                    const uid = String(m.fromId?.userId || '');
+                    const u = userMap.get(uid);
+                    return u ? [u.firstName, u.lastName].filter(Boolean).join(' ') : '';
+                })(),
+                isOut: !!m.out,
+                replyToId,
+                quoteData,
+                topicRootMessageId: rootMessageId,
+                msgType: normalized.msgType,
+                attachments: normalized.attachments,
+                media: m.media ? { type: m.media.className } : undefined,
+                localPaths: undefined,
+            };
+        });
+        const db = DatabaseService_1.default.getInstance();
+        if (db) {
+            let scheduledMediaDownloads = 0;
+            for (let index = 0; index < mappedMessages.length; index++) {
+                const message = mappedMessages[index];
+                const existingMessage = db.queryOne(`SELECT local_paths FROM messages
+           WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'`, [message.id, accountId, chatId]);
+                // Repair rows that history/difference inserted earlier with an
+                // incomplete reply header and therefore the wrong topic_id.
+                db.run(`
+          UPDATE messages SET topic_id = ?, reply_to_id = ?, quote_data = COALESCE(quote_data, ?)
+          WHERE msg_id = ? AND owner_zalo_id = ? AND thread_id = ? AND channel = 'telegram_user'
+        `, [rootMessageId, message.replyToId || null, message.quoteData || null, message.id, accountId, chatId]);
+                db.run(`
+          INSERT OR IGNORE INTO messages
+            (msg_id, owner_zalo_id, thread_id, thread_type, sender_id, content, msg_type, timestamp, is_sent, attachments, status, channel, reply_to_id, quote_data, topic_id)
+          VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 'received', 'telegram_user', ?, ?, ?)
+        `, [
+                    message.id, accountId, chatId, message.senderId,
+                    message.text || '', message.msgType,
+                    Number(message.date || 0) * 1000, message.isOut ? 1 : 0,
+                    JSON.stringify(message.attachments || []),
+                    message.replyToId || null, message.quoteData || null, message.topicRootMessageId,
+                ]);
+                const rawMessage = messages[index];
+                let hasLocalMedia = false;
+                try {
+                    const localPaths = typeof existingMessage?.local_paths === 'string'
+                        ? JSON.parse(existingMessage.local_paths || '{}')
+                        : existingMessage?.local_paths || {};
+                    hasLocalMedia = Object.values(localPaths).some(Boolean);
+                    message.localPaths = localPaths;
+                }
+                catch { }
+                // Hydrate only the newest visible media and never redownload rows that
+                // already have a local file. Queuing every historical attachment from
+                // several rapidly-clicked topics opened many exported DC senders.
+                if (rawMessage?.media && !hasLocalMedia && scheduledMediaDownloads < 12) {
+                    scheduledMediaDownloads++;
+                    downloadMediaForMessage(accountId, conn.client, rawMessage, message.id, message.msgType, chatId).catch(() => { });
+                }
+            }
+        }
+        if (latestTopicMessageRequests.get(requestKey) === requestToken) {
+            latestTopicMessageRequests.delete(requestKey);
+        }
+        return { success: true, messages: mappedMessages };
+    }
+    catch (err) {
+        if (latestTopicMessageRequests.get(requestKey) === requestToken) {
+            latestTopicMessageRequests.delete(requestKey);
+        }
+        tgLog('warn', accountId, 'topic_api', 'TOPIC_MESSAGES_FAILED', {
+            chatId,
+            requestedId: rootMessageId,
+            error: err?.message || String(err),
+        });
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Tạo topic mới trong forum group
+ */
+async function createForumTopic(accountId, chatId, title, iconColor, iconEmojiId) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const result = await conn.client.invoke(new Api.channels.CreateForumTopic({
+            channel: await resolveInputChannel(accountId, conn.client, chatId),
+            title,
+            iconColor: iconColor || 0,
+            iconEmojiId: iconEmojiId ? BigInt(iconEmojiId) : undefined,
+        }));
+        const topicId = getMessageIdFromUpdates(result);
+        return { success: true, topicId };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Đổi tên/đóng/mở topic
+ */
+async function editForumTopic(accountId, chatId, topicId, opts) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        await conn.client.invoke(new Api.channels.EditForumTopic({
+            channel: await resolveInputChannel(accountId, conn.client, chatId),
+            topicId: Number(topicId),
+            title: opts.title,
+            iconEmojiId: opts.iconEmojiId ? BigInt(opts.iconEmojiId) : undefined,
+            closed: opts.closed,
+            pinned: opts.pinned,
+        }));
+        return { success: true };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Gửi tin nhắn vào topic cụ thể
+ */
+async function sendTopicMessage(accountId, chatId, rootMessageId, text) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    const denial = getPersistedTelegramSendDenial(accountId, chatId);
+    if (denial)
+        return { success: false, error: denial };
+    const rateLimit = checkRateLimit(accountId);
+    if (!rateLimit.allowed)
+        return { success: false, error: `Gửi tin quá nhanh. Vui lòng chờ ${rateLimit.waitSeconds} giây.` };
+    try {
+        const { Api } = require('telegram');
+        const peer = await resolveInputPeer(accountId, conn.client, chatId);
+        const result = await conn.client.invoke(new Api.messages.SendMessage({
+            peer,
+            message: text,
+            replyTo: new Api.InputReplyToMessage({
+                replyToMsgId: Number(rootMessageId),
+                topMsgId: Number(rootMessageId),
+            }),
+            randomId: BigInt(Math.floor(Math.random() * 2 ** 64)),
+        }));
+        const msgId = getMessageIdFromUpdates(result) || String(Date.now());
+        const now = Date.now();
+        // Save to DB (INSERT OR IGNORE — socket echo sẽ skip nếu đã tồn tại)
+        const db = DatabaseService_1.default.getInstance();
+        if (db) {
+            db.run(`INSERT OR IGNORE INTO messages (msg_id, owner_zalo_id, thread_id, thread_type, sender_id, content, msg_type, timestamp, is_sent, attachments, status, channel, reply_to_id, topic_id) VALUES (?, ?, ?, 1, ?, ?, 'text', ?, 1, '[]', 'sent', 'telegram_user', ?, ?)`, [msgId, accountId, chatId, accountId, text, now, null, rootMessageId]);
+            db.run(`
+        INSERT INTO contacts (owner_zalo_id, contact_id, display_name, avatar_url, is_friend, contact_type, unread_count, last_message, last_message_time, channel, is_in_others)
+        VALUES (?, ?, '', '', 0, 'group', 0, ?, ?, 'telegram_user', 0)
+        ON CONFLICT(owner_zalo_id, contact_id) DO UPDATE SET
+          last_message = CASE WHEN excluded.last_message_time >= COALESCE(contacts.last_message_time, 0) THEN excluded.last_message ELSE contacts.last_message END,
+          last_message_time = CASE WHEN excluded.last_message_time >= COALESCE(contacts.last_message_time, 0) THEN excluded.last_message_time ELSE contacts.last_message_time END
+      `, [accountId, chatId, text, now]);
+        }
+        // Emit event cho renderer
+        EventBroadcaster_1.default.emit('event:message', {
+            zaloId: accountId,
+            channel: 'telegram_user',
+            message: {
+                channel: 'telegram_user',
+                type: 1,
+                threadId: chatId,
+                isSelf: true,
+                _silentNotification: true,
+                data: {
+                    uidFrom: accountId,
+                    idTo: chatId,
+                    msgId,
+                    content: text,
+                    preview: text,
+                    msgType: 'text',
+                    channel: 'telegram_user',
+                    ts: String(now),
+                    topicId: rootMessageId,
+                },
+            },
+        });
+        return { success: true, messageId: msgId };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+// ─── Telegram Sticker/GIF APIs ──────────────────────────────────────────────
+/** Get all installed sticker sets */
+async function getStickerSets(accountId) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const result = await conn.client.invoke(new Api.messages.GetAllStickers({ hash: BigInt(0) }));
+        const sets = (result.sets || []).map((set) => ({
+            id: String(set.id?.valueOf?.() || set.id || ''),
+            accessHash: String(set.accessHash?.valueOf?.() || ''),
+            shortName: set.shortName || '',
+            title: set.title || '',
+            count: set.count || 0,
+        }));
+        Logger_1.default.log(`[TelegramUser] getStickerSets: ${sets.length} sets, sample: ${sets[0]?.shortName || 'none'}`);
+        return { success: true, sets };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/** Get stickers from a specific set */
+async function getStickerSetStickers(accountId, setId, accessHash, shortName) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        // Use InputStickerSetShortName if available (doesn't need accessHash)
+        let stickerset;
+        if (shortName) {
+            stickerset = new Api.InputStickerSetShortName({ shortName });
+        }
+        else {
+            // Fallback: need valid accessHash
+            if (!accessHash || accessHash === '0') {
+                return { success: false, error: 'Missing sticker set accessHash' };
+            }
+            stickerset = new Api.InputStickerSetID({ id: BigInt(setId), accessHash: BigInt(accessHash) });
+        }
+        const result = await conn.client.invoke(new Api.messages.GetStickerSet({
+            stickerset,
+            hash: 0, // int type, not long
+        }));
+        const stickers = (result.documents || []).map((doc) => {
+            const attrs = doc.attributes || [];
+            const stickerAttr = attrs.find((a) => a.className === 'DocumentAttributeSticker');
+            const imageSize = attrs.find((a) => a.className === 'DocumentAttributeImageSize');
+            const mimeType = String(doc.mimeType || '');
+            const format = mimeType.includes('tgsticker') ? 'tgs' : mimeType.includes('webm') ? 'webm' : 'webp';
+            return {
+                id: String(doc.id?.valueOf?.() || doc.id || ''),
+                emoji: stickerAttr?.alt || '',
+                format, width: imageSize?.w || 512, height: imageSize?.h || 512,
+                accessHash: String(doc.accessHash || ''), dcId: doc.dcId || 0,
+            };
+        });
+        return { success: true, stickers };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/** Get recent stickers */
+async function getRecentStickers(accountId) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const result = await conn.client.invoke(new Api.messages.GetRecentStickers({ hash: BigInt(0) }));
+        const stickers = (result.stickers || []).map((doc) => {
+            const attrs = doc.attributes || [];
+            const stickerAttr = attrs.find((a) => a.className === 'DocumentAttributeSticker');
+            const mimeType = String(doc.mimeType || '');
+            const format = mimeType.includes('tgsticker') ? 'tgs' : mimeType.includes('webm') ? 'webm' : 'webp';
+            return { id: String(doc.id?.valueOf?.() || doc.id || ''), emoji: stickerAttr?.alt || '', format };
+        });
+        return { success: true, stickers };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/** Get trending GIFs */
+async function getGifs(accountId) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const result = await conn.client.invoke(new Api.messages.GetGifs({ hash: BigInt(0) }));
+        const gifs = (result.gifs || []).map((doc) => ({
+            id: String(doc.id?.valueOf?.() || doc.id || ''),
+            dcId: doc.dcId || 0,
+            accessHash: String(doc.accessHash || ''),
+            size: doc.size || 0,
+        }));
+        return { success: true, gifs };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/** Search GIFs */
+async function searchGifs(accountId, query) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const result = await conn.client.invoke(new Api.messages.SearchGifs({ q: query, offset: 0 }));
+        const gifs = (result.gifs || []).map((doc) => ({
+            id: String(doc.id?.valueOf?.() || doc.id || ''),
+            dcId: doc.dcId || 0,
+            accessHash: String(doc.accessHash || ''),
+        }));
+        return { success: true, gifs };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/** Send sticker by document ID */
+async function sendSticker(accountId, chatId, stickerId, accessHash) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const peer = await resolveInputPeer(accountId, conn.client, chatId);
+        // Try to resolve the sticker document to get correct accessHash and fileReference
+        let stickerAccessHash = BigInt(accessHash || '0');
+        let fileReference = Buffer.from([]);
+        if (!accessHash) {
+            // Fallback: try to get from cached sticker or recent stickers
+            try {
+                const recent = await conn.client.invoke(new Api.messages.GetRecentStickers({ hash: BigInt(0) }));
+                const found = (recent.stickers || []).find((d) => String(d.id) === stickerId);
+                if (found) {
+                    stickerAccessHash = found.accessHash || BigInt(0);
+                    fileReference = found.fileReference || Buffer.from([]);
+                }
+            }
+            catch { }
+        }
+        const result = await conn.client.sendFile(peer, {
+            file: new Api.InputDocument({
+                id: BigInt(stickerId),
+                accessHash: stickerAccessHash,
+                fileReference,
+            }),
+        });
+        return { success: true, messageId: String(result?.id || Date.now()) };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/** Send GIF by document ID */
+async function sendGif(accountId, chatId, documentId) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        const peer = await resolveInputPeer(accountId, conn.client, chatId);
+        const result = await conn.client.sendFile(peer, {
+            file: new Api.InputDocument({ id: BigInt(documentId), accessHash: BigInt(0), fileReference: Buffer.from([]) }),
+        });
+        return { success: true, messageId: String(result?.id || Date.now()) };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+/**
+ * Download sticker thumbnail for picker display.
+ * Returns local file path of the downloaded sticker.
+ */
+async function downloadSticker(accountId, stickerId, accessHash) {
+    const conn = ensureConnected(accountId);
+    if ('error' in conn)
+        return { success: false, error: conn.error };
+    try {
+        const { Api } = require('telegram');
+        // Try to get the sticker document
+        let doc = null;
+        // Method 1: Get from recent stickers
+        try {
+            const recent = await conn.client.invoke(new Api.messages.GetRecentStickers({ hash: BigInt(0) }));
+            doc = (recent.stickers || []).find((d) => String(d.id) === stickerId);
+        }
+        catch { }
+        // Method 2: If not found in recent, try from faved stickers
+        if (!doc) {
+            try {
+                const faved = await conn.client.invoke(new Api.messages.GetFavedStickers({ hash: BigInt(0) }));
+                doc = (faved.stickers || []).find((d) => String(d.id) === stickerId);
+            }
+            catch { }
+        }
+        if (!doc) {
+            // Try to construct InputDocument from provided accessHash
+            if (accessHash) {
+                doc = { id: BigInt(stickerId), accessHash: BigInt(accessHash), fileReference: Buffer.from([]) };
+            }
+            else {
+                return { success: false, error: 'Sticker not found in recent/faved' };
+            }
+        }
+        // Download the document
+        const buffer = await conn.client.downloadMedia(doc);
+        if (!buffer || buffer.length === 0) {
+            return { success: false, error: 'Download failed' };
+        }
+        // Save to disk
+        const fs = require('fs');
+        const path = require('path');
+        const FileStorageService = require('../file/FileStorageService').default;
+        const baseDir = FileStorageService.getBaseDir();
+        const stickersDir = path.join(baseDir, accountId, 'stickers');
+        if (!fs.existsSync(stickersDir))
+            fs.mkdirSync(stickersDir, { recursive: true });
+        const mimeType = doc.mimeType || '';
+        const ext = mimeType.includes('webm') ? '.webm' : mimeType.includes('tgsticker') || mimeType.includes('lottie') ? '.tgs' : '.webp';
+        const filePath = path.join(stickersDir, `sticker_${stickerId}${ext}`);
+        fs.writeFileSync(filePath, Buffer.from(buffer));
+        return { success: true, localPath: filePath };
+    }
+    catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+// ─── Test seams ──────────────────────────────────────────────────────────────
+// Recovery/discovery/lifecycle helpers below are module-private because the
+// listener is the only production caller. Regression tests for the sleep/wake
+// audit (docs/sleep-wake-network-reconnect-audit-plan.md) need to exercise the
+// real implementations with fake clients, so expose a narrow namespace here
+// instead of duplicating the logic in test fixtures.
+// Replace these with proper module APIs as the recovery coordinator lands.
+exports.__test = {
+    drainChannelDifference,
+    drainChannelDifferenceNow,
+    synchronizeTelegramAccount,
+    fetchMissedMessages,
+    recoverChannelUpdates,
+    reconcileTelegramDialogMembership,
+    startHealthCheck,
+    clearHealthCheck,
+    scheduleReconnectCatchUp,
+    runChannelRecoveryWorkers,
+    channelDifferenceQueues,
+    recoveringUpdateAccounts,
+    syncingAccounts,
+    membershipReconciledAccounts,
+    membershipReconciliations,
+    reconnectCatchUps,
+    activeListeners,
+};
+//# sourceMappingURL=TelegramUserListener.js.map

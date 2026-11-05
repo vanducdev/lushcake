@@ -1,0 +1,1517 @@
+"use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const electron_1 = require("electron");
+const path = __importStar(require("path"));
+const fs = __importStar(require("fs"));
+const electron_updater_1 = require("electron-updater");
+const cron = __importStar(require("node-cron"));
+const DatabaseService_1 = __importDefault(require("../src/services/database/DatabaseService"));
+const loginIpc_1 = require("./ipc/loginIpc");
+const zaloIpc_1 = require("./ipc/zaloIpc");
+const databaseIpc_1 = require("./ipc/databaseIpc");
+const fileIpc_1 = require("./ipc/fileIpc");
+const crmIpc_1 = require("./ipc/crmIpc");
+const workflowIpc_1 = require("./ipc/workflowIpc");
+const integrationIpc_1 = require("./ipc/integrationIpc");
+const aiAssistantIpc_1 = require("./ipc/aiAssistantIpc");
+const utilIpc_1 = require("./ipc/utilIpc");
+const employeeIpc_1 = require("./ipc/employeeIpc");
+const relayIpc_1 = require("./ipc/relayIpc");
+const workspaceIpc_1 = require("./ipc/workspaceIpc");
+const facebookIpc_1 = require("./ipc/facebookIpc");
+const telegramIpc_1 = require("./ipc/telegramIpc");
+const telegramUserIpc_1 = require("./ipc/telegramUserIpc");
+const proxyIpc_1 = require("./ipc/proxyIpc");
+const erpTaskIpc_1 = require("./ipc/erpTaskIpc");
+const erpCalendarIpc_1 = require("./ipc/erpCalendarIpc");
+const erpNoteIpc_1 = require("./ipc/erpNoteIpc");
+const erpNotificationIpc_1 = require("./ipc/erpNotificationIpc");
+const erpHrmIpc_1 = require("./ipc/erpHrmIpc");
+const lockScreenIpc_1 = require("./ipc/lockScreenIpc");
+const libraryIpc_1 = require("./ipc/libraryIpc");
+const WorkspaceManager_1 = __importDefault(require("../src/utils/WorkspaceManager"));
+const HttpConnectionManager_1 = __importDefault(require("../src/services/http/HttpConnectionManager"));
+const WorkflowEngineService_1 = __importDefault(require("../src/services/workflow/WorkflowEngineService"));
+const WebhookGatewayService_1 = __importDefault(require("../src/services/workflow/WebhookGatewayService"));
+const IntegrationRegistry_1 = __importDefault(require("../src/services/integrations/IntegrationRegistry"));
+const EventBroadcaster_1 = __importDefault(require("../src/services/event/EventBroadcaster"));
+const CRMQueueService_1 = __importDefault(require("../src/services/crm/CRMQueueService"));
+const FileStorageService_1 = __importDefault(require("../src/services/file/FileStorageService"));
+const TrackingService_1 = __importDefault(require("../src/services/tracking/TrackingService"));
+const BuildConfig_1 = require("../src/configs/BuildConfig");
+const Logger_1 = __importDefault(require("../src/utils/Logger"));
+// CHANNEL constant — same as src/ui/lib/channelHelper.ts (electron build excludes src/ui/)
+const CHANNEL = { ZALO: 'zalo', FACEBOOK: 'facebook', TELEGRAM_BOT: 'telegram_bot', TELEGRAM_USER: 'telegram_user' };
+/**
+ * Decrypt cookies from DB — mirror of DatabaseService.decryptCookies().
+ * startupAllWorkspaces reads raw rows via queryOtherDb, so we must decrypt
+ * before passing to loginService.connectUser().
+ */
+function decryptCookiesForStartup(encrypted) {
+    if (!encrypted)
+        return encrypted;
+    const trimmed = encrypted.trimStart();
+    if (trimmed.startsWith('[') || trimmed.startsWith('{'))
+        return encrypted;
+    if (/^\d+:[A-Za-z0-9_-]+$/.test(trimmed))
+        return encrypted;
+    // Try safeStorage — works for any encrypted format (DPAPI, U2Fsd, etc.)
+    // GramJS sessions are NOT encrypted → safeStorage.decryptString throws → return as-is
+    try {
+        if (electron_1.safeStorage.isEncryptionAvailable()) {
+            const decrypted = electron_1.safeStorage.decryptString(Buffer.from(encrypted, 'base64'));
+            if (decrypted.startsWith('[') || decrypted.startsWith('{')) {
+                JSON.parse(decrypted); // validate
+                return decrypted;
+            }
+            return decrypted;
+        }
+    }
+    catch {
+        // safeStorage failed → likely GramJS session or corrupted data → return as-is
+    }
+    return encrypted;
+}
+const isDev = BuildConfig_1.IS_DEV_BUILD;
+let isQuitting = false;
+// ─── Hardware acceleration ────────────────────────────────────────────────────
+// Giữ GPU acceleration BẬT: tắt hardware acceleration khiến CPU render toàn bộ UI,
+// dẫn đến renderer unresponsive → màn hình đen sau khi dùng một lúc.
+// app.disableHardwareAcceleration(); // ← ĐÃ XÓA: gây freeze/màn đen
+// ─── Cached icons ──────────────────────────────────────────────────────────────
+let cachedNormalIcon = null;
+let cachedDotIcon = null;
+let cachedOverlayDot = null; // 16×16 red dot overlay cho Windows taskbar
+let currentIconIsDot = false;
+let dockBounceId = null; // macOS: bounce request ID để cancel đúng
+/** Cancel dock bounce / taskbar flash trên cả macOS và Windows */
+function cancelDockBounce() {
+    if (process.platform === 'darwin') {
+        // macOS: cancel bounce bằng ID đã lưu
+        if (dockBounceId !== null && electron_1.app.dock) {
+            electron_1.app.dock.cancelBounce(dockBounceId);
+            dockBounceId = null;
+        }
+    }
+    else {
+        mainWindow?.flashFrame(false);
+    }
+}
+function resolveIconPath(relativePath) {
+    const fromDir = path.join(__dirname, '../../', relativePath);
+    const unpackedPath = fromDir.replace('app.asar', 'app.asar.unpacked');
+    if (fs.existsSync(unpackedPath))
+        return unpackedPath;
+    return fromDir;
+}
+/** Load icon: ưu tiên _128.png (128x128), fallback .png gốc rồi resize */
+function loadIcon(baseName) {
+    const png128 = resolveIconPath(`resources/icons/${baseName}_128.png`);
+    if (fs.existsSync(png128)) {
+        const img = electron_1.nativeImage.createFromPath(png128);
+        if (!img.isEmpty())
+            return img;
+    }
+    const pngOrig = resolveIconPath(`resources/icons/${baseName}.png`);
+    if (fs.existsSync(pngOrig)) {
+        const raw = electron_1.nativeImage.createFromPath(pngOrig);
+        if (!raw.isEmpty())
+            return raw.resize({ width: 128, height: 128 });
+    }
+    return electron_1.nativeImage.createEmpty();
+}
+function loadIcons() {
+    cachedNormalIcon = loadIcon('icon');
+    cachedDotIcon = loadIcon('icon_dot');
+    // 16×16 red dot cho Windows taskbar overlay
+    const overlayPath = resolveIconPath('resources/icons/overlay_dot.png');
+    if (fs.existsSync(overlayPath)) {
+        cachedOverlayDot = electron_1.nativeImage.createFromPath(overlayPath);
+        if (cachedOverlayDot.isEmpty())
+            cachedOverlayDot = null;
+    }
+}
+// ─── Vô hiệu hóa remote debugging ngay khi load (trước app.whenReady) ────────
+if (!isDev) {
+    electron_1.app.commandLine.appendSwitch('remote-debugging-port', '0');
+    electron_1.app.commandLine.appendSwitch('--inspect', '0');
+    electron_1.app.commandLine.appendSwitch('--inspect-brk', '0');
+}
+// ─── Force Vietnamese locale → input[type="date"] hiển thị dd/mm/yyyy ────────
+electron_1.app.commandLine.appendSwitch('lang', 'vi-VN');
+electron_1.app.commandLine.appendSwitch('accept-lang', 'vi-VN,vi;q=0.9');
+// Đặt tên app (hiện trên taskbar, tray, macOS dock)
+electron_1.app.setName('LushCake');
+// Windows: đặt AppUserModelId để taskbar/notification hiển thị đúng icon & tên
+// Dev: AUMID unique mỗi lần chạy → Windows tạo icon cache mới → hiện đúng icon
+// Production: AUMID cố định (khớp appId electron-builder, exe đã embed icon qua afterPack)
+if (process.platform === 'win32') {
+    electron_1.app.setAppUserModelId(isDev ? `com.LushCake.dev.${Date.now()}` : 'com.LushCake.app');
+}
+// ─── Register custom protocol BEFORE app ready (required by Electron) ─────────
+// local-media://abs-path  →  serve file from absolute path on disk
+// Usage in renderer: local-media:///D:/path/to/file.jpg
+//
+// deplao://openChat?accountId=xxx&threadId=yyy&threadType=0&channel=zalo
+//   → deep link: mở app + active đúng hội thoại
+electron_1.protocol.registerSchemesAsPrivileged([
+    {
+        scheme: 'local-media',
+        privileges: {
+            secure: true,
+            supportFetchAPI: true,
+            bypassCSP: true,
+            corsEnabled: true,
+            stream: true,
+        },
+    },
+    {
+        scheme: 'lushcake',
+        privileges: {
+            secure: true,
+            bypassCSP: true,
+            corsEnabled: true,
+            stream: false,
+        },
+    },
+    {
+        scheme: 'deplao',
+        privileges: {
+            secure: true,
+            bypassCSP: true,
+            corsEnabled: true,
+            stream: false,
+        },
+    },
+]);
+// ─── Suppress Chromium DevTools "Autofill.enable" / "Autofill.setAddresses" errors ──
+electron_1.app.commandLine.appendSwitch('disable-features', 'AutofillServerCommunication');
+electron_1.app.commandLine.appendSwitch('disable-features', 'Autofill');
+// ─── Single Instance Lock ──────────────────────────────────────────────────────
+const gotLock = electron_1.app.requestSingleInstanceLock();
+if (!gotLock) {
+    // Đã có instance đang chạy → focus instance đó rồi thoát
+    // ⚡ FIX: app.quit() là async - code phía dưới vẫn chạy tiếp nếu không exit ngay.
+    // Nếu không exit, instance thứ 2 vẫn đăng ký protocols, IPC handlers, tạo tray icon,
+    // chạy ngầm không cửa sổ → process treo trong Task Manager.
+    electron_1.app.quit();
+    process.exit(0);
+}
+let mainWindow = null;
+let inAppBrowserWindow = null;
+let tray = null;
+let rendererReportedReady = false;
+let onRendererReportedReady = null;
+// In development the renderer is served by Vite. Windows can suspend the
+// localhost socket while the laptop is asleep, leaving the main process alive
+// but the renderer with a blank page and ERR_NETWORK_IO_SUSPENDED. Keep this
+// recovery isolated to dev: packaged builds load local files and must retain
+// their current UI state on resume.
+let devRendererReloadTimer = null;
+let devRendererReloadAttempts = 0;
+let devRendererSuspended = false;
+let devRendererSystemSuspended = false;
+const DEV_RENDERER_MAX_RELOAD_ATTEMPTS = 4;
+function loadDevRenderer(reason, delayMs = 0) {
+    if (!isDev || devRendererReloadTimer || !mainWindow || mainWindow.isDestroyed())
+        return;
+    if (devRendererReloadAttempts >= DEV_RENDERER_MAX_RELOAD_ATTEMPTS) {
+        console.error(`[main] Dev renderer recovery stopped after ${devRendererReloadAttempts} attempts (${reason})`);
+        return;
+    }
+    devRendererReloadTimer = setTimeout(() => {
+        devRendererReloadTimer = null;
+        if (!mainWindow || mainWindow.isDestroyed())
+            return;
+        devRendererReloadAttempts++;
+        console.warn(`[main] Reloading Vite renderer after ${reason} (attempt ${devRendererReloadAttempts}/${DEV_RENDERER_MAX_RELOAD_ATTEMPTS})`);
+        void mainWindow.loadURL('http://localhost:27799').catch((err) => {
+            console.warn(`[main] Vite renderer reload failed: ${err?.message || err}`);
+        });
+    }, delayMs);
+}
+function createWindow() {
+    const isMac = process.platform === 'darwin';
+    mainWindow = new electron_1.BrowserWindow({
+        width: 1280,
+        height: 800,
+        minWidth: 900,
+        minHeight: 600,
+        title: 'LushCake',
+        // Windows: frameless → custom title bar
+        // macOS: hiddenInset → ẩn title bar, giữ traffic light buttons
+        frame: isMac,
+        titleBarStyle: isMac ? 'hiddenInset' : 'default',
+        trafficLightPosition: isMac ? { x: 12, y: 12 } : undefined,
+        backgroundColor: '#1a1a2e',
+        icon: cachedNormalIcon && !cachedNormalIcon.isEmpty()
+            ? cachedNormalIcon
+            : (process.platform === 'win32'
+                ? resolveIconPath('resources/icons/icon.ico')
+                : resolveIconPath('resources/icons/icon.png')),
+        webPreferences: {
+            preload: path.join(__dirname, 'preload.js'),
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: false,
+        },
+        show: false,
+    });
+    // Load Vite dev server or built files
+    if (isDev) {
+        mainWindow.loadURL('http://localhost:27799');
+    }
+    else {
+        mainWindow.loadFile(path.join(__dirname, '../../dist/index.html'));
+    }
+    // DevTools: Không tự động mở khi khởi động app
+    // Trong dev mode, nhấn F12 hoặc Ctrl+Shift+I để bật/tắt (toggle) khi cần
+    if (BuildConfig_1.SHOW_DEV_TOOLS) {
+        mainWindow.webContents.on('before-input-event', (_event, input) => {
+            if (input.type !== 'keyDown')
+                return;
+            if (input.key === 'F12' || (input.control && input.shift && input.key.toUpperCase() === 'I')) {
+                mainWindow?.webContents.toggleDevTools();
+                _event.preventDefault();
+            }
+        });
+    }
+    else {
+        mainWindow.webContents.on('before-input-event', (_event, input) => {
+            if (input.type !== 'keyDown')
+                return;
+            const blocked = input.key === 'F12' ||
+                (input.control && input.shift && ['I', 'J', 'C', 'K'].includes(input.key.toUpperCase()));
+            if (blocked)
+                _event.preventDefault();
+        });
+        mainWindow.webContents.on('devtools-opened', () => {
+            mainWindow?.webContents.closeDevTools();
+        });
+        mainWindow.webContents.on('context-menu', (e) => e.preventDefault());
+    }
+    let initialWindowShown = false;
+    mainWindow.once('ready-to-show', () => {
+        initialWindowShown = true;
+        if (cachedNormalIcon && !cachedNormalIcon.isEmpty()) {
+            mainWindow?.setIcon(cachedNormalIcon);
+        }
+        mainWindow?.show();
+    });
+    // Vite can take longer than Chromium's normal paint deadline after a cold
+    // start. Do not show an unpainted Chromium surface forever: the old fallback
+    // only called show(), which is exactly the blank blue screen users saw after
+    // Electron's network service restarted.
+    setTimeout(() => {
+        if (!initialWindowShown && mainWindow && !mainWindow.isDestroyed()) {
+            console.warn('[main] Renderer did not emit ready-to-show in time; recovering renderer');
+            mainWindow.show();
+            if (isDev) {
+                loadDevRenderer('ready-to-show timeout', 250);
+            }
+            else {
+                mainWindow.webContents.reload();
+            }
+        }
+    }, 8000).unref();
+    // A successful full page load means Vite is reachable again. Reset the
+    // bounded retry budget so a later laptop suspend can recover independently.
+    mainWindow.webContents.on('did-finish-load', () => {
+        if (!isDev)
+            return;
+        devRendererReloadAttempts = 0;
+        devRendererSuspended = false;
+    });
+    // ── Renderer crash recovery ────────────────────────────────────────────
+    // Khi renderer process bị crash hoặc bị kill bởi OS (OOM) → màn trắng,
+    // nút X bị chặn bởi close handler → user phải mở Task Manager.
+    // Fix: tự reload lại renderer, nếu vẫn crash → quit hoàn toàn.
+    let crashCount = 0;
+    mainWindow.webContents.on('render-process-gone', (_event, details) => {
+        console.error(`[main] Renderer process gone: ${details.reason} (exitCode=${details.exitCode})`);
+        crashCount++;
+        if (crashCount <= 2 && mainWindow && !mainWindow.isDestroyed()) {
+            console.log(`[main] Attempting renderer reload (attempt ${crashCount})...`);
+            setTimeout(() => {
+                if (mainWindow && !mainWindow.isDestroyed()) {
+                    if (isDev) {
+                        mainWindow.loadURL('http://localhost:27799');
+                    }
+                    else {
+                        mainWindow.loadFile(path.join(__dirname, '../../dist/index.html'));
+                    }
+                }
+            }, 1500);
+        }
+        else {
+            console.error(`[main] Renderer crashed ${crashCount} times - quitting app`);
+            isQuitting = true;
+            electron_1.app.quit();
+        }
+    });
+    // Window bị treo (unresponsive) → thông báo và reload
+    mainWindow.on('unresponsive', () => {
+        console.warn('[main] Window unresponsive - reloading renderer');
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.reload();
+        }
+    });
+    // Load HTML thất bại (file bị thiếu, Vite dev server chưa bật, ...)
+    // → window tồn tại nhưng trắng, ready-to-show vẫn fire → user thấy trắng
+    mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+        console.error(`[main] did-fail-load: ${errorCode} ${errorDescription} - ${validatedURL}`);
+        if (!isDev)
+            return;
+        if (String(errorDescription).includes('ERR_NETWORK_IO_SUSPENDED')) {
+            // Do not keep issuing localhost requests while Windows has suspended the
+            // network stack. powerMonitor.resume will reload once Node/Vite can run.
+            devRendererSuspended = true;
+            console.warn('[main] Vite renderer request suspended; waiting for system resume');
+            // The failed request may be reported just after the OS has emitted
+            // `resume`; in that ordering there will be no second resume event.
+            if (!devRendererSystemSuspended) {
+                loadDevRenderer('late suspended Vite request', 1500);
+            }
+            return;
+        }
+        // Vite may still be starting (or has just resumed). Debounced, bounded
+        // retries avoid the previous unbounded loadURL loop and blank window.
+        loadDevRenderer(`load failure ${errorDescription}`, 1500);
+    });
+    // CSP: chặn inline scripts bên ngoài trong production
+    if (!isDev) {
+        mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+            callback({
+                responseHeaders: {
+                    ...details.responseHeaders,
+                    'Content-Security-Policy': [
+                        // img-src và media-src phải có https: để load ảnh/video từ CDN Zalo
+                        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: local-media: blob: https: http:; media-src 'self' local-media: blob: https: http:; connect-src 'self' https: http: wss:; font-src 'self' data: https:; frame-src 'self' https:;",
+                    ],
+                },
+            });
+        });
+    }
+    // Nút X của OS frame (không dùng vì frame=false) - vẫn handle để an toàn
+    mainWindow.on('close', (event) => {
+        if (!isQuitting) {
+            event.preventDefault();
+            mainWindow?.hide();
+            showTrayNotification();
+        }
+    });
+    mainWindow.on('closed', () => { mainWindow = null; });
+    // Broadcast window focus/blur/hide to renderer for accurate unread tracking
+    mainWindow.on('focus', () => {
+        // macOS: cancel dock bounce via stored ID; Windows/Linux: cancel flashFrame
+        cancelDockBounce();
+        mainWindow?.webContents.send('app:windowFocus', true);
+    });
+    mainWindow.on('blur', () => mainWindow?.webContents.send('app:windowFocus', false));
+    mainWindow.on('minimize', () => mainWindow?.webContents.send('app:windowFocus', false));
+    mainWindow.on('restore', () => {
+        cancelDockBounce();
+        mainWindow?.webContents.send('app:windowFocus', true);
+    });
+    mainWindow.on('hide', () => mainWindow?.webContents.send('app:windowFocus', false));
+    mainWindow.on('show', () => {
+        cancelDockBounce();
+        mainWindow?.webContents.send('app:windowFocus', true);
+        // Re-apply overlay sau khi show lại
+        if (process.platform === 'win32' && currentIconIsDot && cachedOverlayDot && !cachedOverlayDot.isEmpty()) {
+            mainWindow?.setOverlayIcon(cachedOverlayDot, 'Tin chưa đọc');
+        }
+    });
+    // Set EventBroadcaster window reference
+    EventBroadcaster_1.default.setWindow(mainWindow);
+    // Set HttpConnectionManager window reference for status push events
+    HttpConnectionManager_1.default.getInstance().setMainWindow(mainWindow);
+    // Khi có instance thứ 2 cố mở → focus instance hiện tại
+    // Trên Windows: deep link từ trình duyệt → argv chứa URL cần parse
+    electron_1.app.on('second-instance', (_event, argv) => {
+        if (mainWindow) {
+            if (mainWindow.isMinimized())
+                mainWindow.restore();
+            if (!mainWindow.isVisible())
+                mainWindow.show();
+            mainWindow.focus();
+        }
+        // Parse deep link URL từ command line (Windows protocol handler)
+        const deepLinkUrl = argv.find((arg) => arg.startsWith('deplao://'));
+        if (deepLinkUrl) {
+            handleDeepLink(deepLinkUrl);
+        }
+    });
+    // macOS: open-url event khi click deep link
+    electron_1.app.on('open-url', (_event, url) => {
+        if (url.startsWith('deplao://')) {
+            handleDeepLink(url);
+        }
+    });
+    return mainWindow;
+}
+function createTray() {
+    let icon = cachedNormalIcon && !cachedNormalIcon.isEmpty()
+        ? cachedNormalIcon
+        : electron_1.nativeImage.createFromPath(resolveIconPath(process.platform === 'win32' ? 'resources/icons/icon.ico' : 'resources/icons/icon.png'));
+    // macOS menu bar: tray icon phải nhỏ (~18×18 points). Icon 128px sẽ hiện rất to.
+    // Resize xuống 18×18 để hiển thị đúng kích thước trên menu bar macOS.
+    if (process.platform === 'darwin' && !icon.isEmpty()) {
+        icon = icon.resize({ width: 18, height: 18 });
+    }
+    tray = new electron_1.Tray(icon.isEmpty() ? electron_1.nativeImage.createEmpty() : icon);
+    const contextMenu = electron_1.Menu.buildFromTemplate([
+        {
+            label: 'Mở LushCake',
+            click: () => { mainWindow?.show(); mainWindow?.focus(); },
+        },
+        { type: 'separator' },
+        {
+            label: 'Thoát hoàn toàn',
+            click: () => {
+                isQuitting = true;
+                electron_1.app.quit();
+                setTimeout(() => {
+                    console.warn('[main] Force-exit after 5s timeout (tray)');
+                    process.exit(0);
+                }, 5000).unref();
+            },
+        },
+    ]);
+    tray.setToolTip('LushCake');
+    tray.setContextMenu(contextMenu);
+    // Double-click tray → mở app
+    tray.on('double-click', () => { mainWindow?.show(); mainWindow?.focus(); });
+    // Single click tray → toggle
+    tray.on('click', () => {
+        if (mainWindow?.isVisible()) {
+            mainWindow.hide();
+        }
+        else {
+            mainWindow?.show();
+            mainWindow?.focus();
+        }
+    });
+}
+/** Hiển thị thông báo system tray khi ẩn ứng dụng xuống tray */
+function showTrayNotification() {
+    if (!electron_1.Notification.isSupported())
+        return;
+    const notif = new electron_1.Notification({
+        title: 'LushCake đang chạy ngầm',
+        body: 'Ứng dụng vẫn đang hoạt động và nhận tin nhắn bình thường. Nhấn vào biểu tượng tray để mở lại.',
+        silent: false,
+    });
+    notif.show();
+    // Tự đóng sau 5 giây
+    setTimeout(() => notif.close(), 5000);
+}
+// Window control IPC handlers
+function registerWindowControls() {
+    electron_1.ipcMain.on('window:minimize', () => mainWindow?.minimize());
+    electron_1.ipcMain.on('window:maximize', () => {
+        if (mainWindow?.isMaximized())
+            mainWindow.unmaximize();
+        else
+            mainWindow?.maximize();
+    });
+    // Nút X trên custom title bar → ẩn xuống tray (không thoát hoàn toàn)
+    electron_1.ipcMain.on('window:close', () => {
+        mainWindow?.hide();
+        showTrayNotification();
+    });
+    // Nút thoát hoàn toàn từ tray menu hoặc renderer
+    electron_1.ipcMain.on('window:quit', () => {
+        isQuitting = true;
+        electron_1.app.quit();
+        // Force-exit: DB close() đã chạy trong before-quit (sync, ~1ms).
+        // 5s đủ cho socket disconnect + service stop. Nếu vẫn kẹt → force kill.
+        setTimeout(() => {
+            console.warn('[main] Force-exit after 5s timeout — background service may be stuck');
+            process.exit(0);
+        }, 5000).unref();
+    });
+    electron_1.ipcMain.handle('window:isMaximized', () => mainWindow?.isMaximized() ?? false);
+    // ─── Nhật ký (Logger) → renderer ─────────────────────────────────
+    // Hook console toàn cục để cả console.* thẳng (không qua Logger) cũng vào buffer
+    Logger_1.default.installConsoleHook();
+    // Forward mỗi log mới sang tab Nhật ký (throttle-free, buffer đã giới hạn 2000 dòng)
+    Logger_1.default.onEntry((entry) => {
+        try {
+            mainWindow?.webContents.send('log:entry', entry);
+        }
+        catch { /* window đã đóng */ }
+    });
+    electron_1.ipcMain.handle('log:getBuffer', () => Logger_1.default.getBuffer());
+    electron_1.ipcMain.handle('log:clear', () => { Logger_1.default.clearBuffer(); return true; });
+    // Open external link in browser
+    electron_1.ipcMain.on('shell:openExternal', (_event, url) => {
+        electron_1.shell.openExternal(url);
+    });
+    electron_1.ipcMain.handle('shell:openPath', async (_event, filePath) => {
+        try {
+            const resolved = FileStorageService_1.default.resolveAbsolutePath(filePath);
+            if (!resolved || !fs.existsSync(resolved)) {
+                return { success: false, error: 'Không tìm thấy tệp đính kèm' };
+            }
+            const error = await electron_1.shell.openPath(resolved);
+            return error ? { success: false, error } : { success: true };
+        }
+        catch (error) {
+            return { success: false, error: error?.message || 'Không thể mở tệp' };
+        }
+    });
+    electron_1.ipcMain.handle('shell:openInApp', async (_event, url) => {
+        try {
+            if (!/^https?:\/\//i.test(url)) {
+                return { success: false, error: 'Chỉ hỗ trợ liên kết web http/https' };
+            }
+            if (!inAppBrowserWindow || inAppBrowserWindow.isDestroyed()) {
+                inAppBrowserWindow = new electron_1.BrowserWindow({
+                    width: 1180,
+                    height: 820,
+                    minWidth: 860,
+                    minHeight: 620,
+                    title: 'Trình duyệt nội bộ',
+                    autoHideMenuBar: true,
+                    parent: mainWindow ?? undefined,
+                    backgroundColor: '#111827',
+                    webPreferences: {
+                        contextIsolation: true,
+                        sandbox: true,
+                    },
+                });
+                inAppBrowserWindow.on('closed', () => {
+                    inAppBrowserWindow = null;
+                });
+            }
+            await inAppBrowserWindow.loadURL(url);
+            if (inAppBrowserWindow.isMinimized())
+                inAppBrowserWindow.restore();
+            inAppBrowserWindow.show();
+            inAppBrowserWindow.focus();
+            return { success: true };
+        }
+        catch (error) {
+            return { success: false, error: error?.message || 'Không thể mở liên kết trong app' };
+        }
+    });
+    // ── Badge / taskbar unread count ─────────────────────────────────
+    electron_1.ipcMain.on('app:setBadge', (_event, count) => {
+        if (!mainWindow)
+            return;
+        if (process.platform === 'darwin') {
+            electron_1.app.setBadgeCount(count > 0 ? count : 0);
+        }
+        else if (process.platform === 'win32') {
+            if (count > 0) {
+                if (!currentIconIsDot) {
+                    currentIconIsDot = true;
+                    // Overlay dot trên taskbar (Windows native API - không bị icon cache)
+                    if (cachedOverlayDot && !cachedOverlayDot.isEmpty()) {
+                        mainWindow.setOverlayIcon(cachedOverlayDot, `${count} tin chưa đọc`);
+                    }
+                    // Tray icon dùng icon_dot (tray không bị cache)
+                    if (cachedDotIcon && !cachedDotIcon.isEmpty()) {
+                        tray?.setImage(cachedDotIcon);
+                    }
+                }
+                tray?.setToolTip(`LushCake - ${count} tin chưa đọc`);
+            }
+            else {
+                if (currentIconIsDot) {
+                    currentIconIsDot = false;
+                    mainWindow.setOverlayIcon(null, '');
+                    if (cachedNormalIcon && !cachedNormalIcon.isEmpty()) {
+                        tray?.setImage(cachedNormalIcon);
+                    }
+                }
+                tray?.setToolTip('LushCake');
+            }
+        }
+        else {
+            try {
+                electron_1.app.setBadgeCount(count > 0 ? count : 0);
+            }
+            catch { }
+        }
+    });
+    electron_1.ipcMain.removeAllListeners('app:badgeImage');
+    // ── Flash taskbar icon (blink notification) ──────────────────────
+    electron_1.ipcMain.on('app:flashFrame', (_event, { active }) => {
+        if (!mainWindow)
+            return;
+        if (process.platform === 'darwin') {
+            // macOS: dùng dock.bounce('informational') → bounce 1 lần nhẹ nhàng
+            // Lưu bounceId để cancelDockBounce() có thể cancel khi focus lại
+            if (active && electron_1.app.dock) {
+                dockBounceId = electron_1.app.dock.bounce('informational');
+            }
+            else if (!active) {
+                cancelDockBounce();
+            }
+        }
+        else {
+            mainWindow.flashFrame(active);
+        }
+    });
+    // ── Notification click → focus window + mở thread ───────────────
+    electron_1.ipcMain.on('app:openThread', (_event, { zaloId, threadId, threadType }) => {
+        if (!mainWindow)
+            return;
+        // Restore + focus: Windows không always reliable với focus() khi minimized
+        if (mainWindow.isMinimized())
+            mainWindow.restore();
+        if (!mainWindow.isVisible())
+            mainWindow.show();
+        mainWindow.setAlwaysOnTop(true);
+        mainWindow.focus();
+        // Bỏ alwaysOnTop sau 200ms - chỉ cần để "kick" window lên foreground
+        setTimeout(() => { try {
+            mainWindow?.setAlwaysOnTop(false);
+        }
+        catch { } }, 200);
+        // Delay nhẹ để đảm bảo renderer sẵn sàng nhận IPC
+        setTimeout(() => {
+            try {
+                mainWindow?.webContents.send('app:openThread', { zaloId, threadId, threadType });
+            }
+            catch { }
+        }, 80);
+    });
+}
+/**
+ * Xử lý deep link URL từ custom protocol deplao://
+ *
+ * Định dạng:
+ *   deplao://openChat?accountId=xxx&threadId=yyy&threadType=0&channel=zalo
+ *
+ * Hỗ trợ thêm action mới bằng cách mở rộng switch(action) bên dưới.
+ */
+function handleDeepLink(url) {
+    try {
+        const parsed = new URL(url);
+        const action = parsed.hostname || parsed.pathname.replace(/^\//, '').split('?')[0];
+        const params = Object.fromEntries(parsed.searchParams.entries());
+        console.log(`[handleDeepLink] action="${action}" params=`, params);
+        switch (action) {
+            case 'openChat': {
+                const accountId = params.accountId || params.zaloId || '';
+                const threadId = params.threadId || '';
+                const threadType = parseInt(params.threadType || '0', 10);
+                const channel = params.channel || CHANNEL.ZALO;
+                if (!accountId || !threadId) {
+                    console.warn('[handleDeepLink] Missing accountId or threadId');
+                    return;
+                }
+                // Gọi lại logic giống notification click → focus + gửi IPC
+                if (!mainWindow)
+                    return;
+                if (mainWindow.isMinimized())
+                    mainWindow.restore();
+                if (!mainWindow.isVisible())
+                    mainWindow.show();
+                mainWindow.setAlwaysOnTop(true);
+                mainWindow.focus();
+                setTimeout(() => { try {
+                    mainWindow?.setAlwaysOnTop(false);
+                }
+                catch { } }, 200);
+                setTimeout(() => {
+                    try {
+                        mainWindow?.webContents.send('app:openThread', {
+                            zaloId: accountId,
+                            threadId,
+                            threadType,
+                        });
+                    }
+                    catch { }
+                }, 80);
+                break;
+            }
+            default:
+                console.warn(`[handleDeepLink] Unknown action: "${action}"`);
+        }
+    }
+    catch (err) {
+        console.error('[handleDeepLink] Failed to parse URL:', url, err.message);
+    }
+}
+/**
+ * Auto-reconnect tất cả Telegram accounts khi app khởi động.
+ * Tương tự reconnectAllFBAccounts nhưng cho Telegram Bot + User.
+ */
+async function reconnectAllTelegramAccounts() {
+    try {
+        const db = DatabaseService_1.default.getInstance();
+        if (!db)
+            return;
+        const accounts = db.getAccounts();
+        const telegramAccounts = accounts.filter((a) => {
+            const ch = a.channel || 'zalo';
+            return (ch === 'telegram_bot' || ch === 'telegram_user') && a.is_active;
+        });
+        if (telegramAccounts.length === 0)
+            return;
+        console.log(`[main] Auto-reconnecting ${telegramAccounts.length} Telegram account(s)...`);
+        for (const acc of telegramAccounts) {
+            const channel = acc.channel || 'zalo';
+            try {
+                if (channel === 'telegram_bot') {
+                    const { startBot } = require('../src/services/telegram/TelegramBotChannelService');
+                    startBot({
+                        accountId: acc.zalo_id,
+                        botToken: acc.cookies || '',
+                        botUsername: acc.username || '',
+                        botFirstName: acc.full_name || '',
+                    });
+                    console.log(`[main] Telegram Bot ${acc.zalo_id} polling started`);
+                }
+                else if (channel === 'telegram_user') {
+                    const stringSession = acc.cookies || '';
+                    if (!stringSession) {
+                        console.warn(`[main] Telegram User ${acc.zalo_id} has no session - skipping`);
+                        continue;
+                    }
+                    // Kiểm tra session hợp lệ (GramJS session là base64 decode thành JSON)
+                    // Nếu session bắt đầu bằng "U2Fsd" = encrypted blob chưa decrypt được → skip
+                    if (stringSession.trimStart().startsWith('U2Fsd')) {
+                        console.warn(`[main] Telegram User ${acc.zalo_id} session is encrypted blob (decrypt failed) - needs re-login`);
+                        continue;
+                    }
+                    const { startListener } = require('../src/services/telegram/TelegramUserListener');
+                    const result = await startListener({
+                        accountId: acc.zalo_id,
+                        phoneNumber: acc.phone || '',
+                        stringSession,
+                    });
+                    if (result?.success) {
+                        console.log(`[main] Telegram User ${acc.zalo_id} listener started`);
+                    }
+                    else {
+                        console.warn(`[main] Telegram User ${acc.zalo_id} failed: ${result?.error}`);
+                    }
+                }
+            }
+            catch (err) {
+                console.warn(`[main] Failed to reconnect Telegram ${acc.zalo_id}: ${err.message}`);
+            }
+        }
+    }
+    catch (err) {
+        console.error('[main] reconnectAllTelegramAccounts error:', err.message);
+    }
+}
+/**
+ * Periodic health check for Telegram bots.
+ * Checks if registered bots are still polling; reconnects if not.
+ * Runs every 60 seconds.
+ */
+function startTelegramBotHealthCheck() {
+    setInterval(() => {
+        try {
+            const { isBotPolling, isBotPollingConflict, tryReconnectBot, getActiveBots } = require('../src/services/telegram/TelegramBotChannelService');
+            const activeBots = getActiveBots();
+            for (const bot of activeBots) {
+                if (!isBotPolling(bot.accountId)) {
+                    if (isBotPollingConflict(bot.accountId))
+                        continue;
+                    console.log(`[main] Telegram Bot ${bot.accountId} not polling — attempting reconnect`);
+                    tryReconnectBot(bot.accountId);
+                }
+            }
+        }
+        catch { }
+    }, 60000);
+}
+/**
+ * Ordered startup: scan all workspaces, start relays + connect Zalo for local workspaces FIRST,
+ * THEN connect remote/employee workspaces. Ensures Boss is ready before employees connect.
+ */
+async function startupAllWorkspaces() {
+    const wsMgr = WorkspaceManager_1.default.getInstance();
+    const db = DatabaseService_1.default.getInstance();
+    const allWorkspaces = wsMgr.listWorkspaces();
+    const localWorkspaces = allWorkspaces.filter(w => w.type === 'local');
+    const remoteWorkspaces = allWorkspaces.filter(w => w.type === 'remote' && w.autoConnect);
+    // ── Phase 1: Start relay servers for ALL local workspaces with relayAutoStart ──
+    for (const ws of localWorkspaces) {
+        if (!ws.relayAutoStart)
+            continue;
+        try {
+            const HttpRelayService = (await Promise.resolve().then(() => __importStar(require('../src/services/http/HttpRelayService')))).default;
+            const relay = HttpRelayService.getInstance();
+            const port = ws.relayPort || 9900;
+            const res = await relay.start(port); // start() is idempotent - skips if already running
+            if (res?.success) {
+                console.log(`[startupAllWorkspaces] Relay started on port ${res.port} for workspace "${ws.name}"`);
+            }
+        }
+        catch (err) {
+            console.error(`[startupAllWorkspaces] Relay start failed for "${ws.name}":`, err.message);
+        }
+    }
+    // ── Phase 2: Auto-connect Zalo accounts for ALL local workspaces ──
+    const LoginService = (await Promise.resolve().then(() => __importStar(require('../src/services/login/LoginService')))).default;
+    const loginService = new LoginService();
+    const connectedZaloIds = new Set();
+    for (const ws of localWorkspaces) {
+        try {
+            const dbPath = wsMgr.resolveDbPath(ws.dbPath || 'deplao-tool.db');
+            if (!dbPath || !require('fs').existsSync(dbPath))
+                continue;
+            // Read accounts from this workspace's DB (without switching active DB)
+            const accounts = db.queryOtherDb(dbPath, (otherDb) => {
+                const rows = otherDb.prepare("SELECT * FROM accounts WHERE is_active = 1 AND (channel = 'zalo' OR channel IS NULL)").all();
+                return rows;
+            });
+            for (const acc of accounts) {
+                if (connectedZaloIds.has(acc.zalo_id))
+                    continue; // already connected
+                try {
+                    const decryptedCookies = decryptCookiesForStartup(acc.cookies || '');
+                    console.log(`[startupAllWorkspaces] ${acc.zalo_id}: raw prefix="${(acc.cookies || '').substring(0, 20)}" → decrypted prefix="${decryptedCookies.substring(0, 40)}" len=${decryptedCookies.length}`);
+                    const connected = await loginService.connectUser({
+                        cookies: decryptedCookies,
+                        imei: acc.imei || '',
+                        userAgent: acc.user_agent || acc.userAgent || '',
+                    });
+                    if (!connected) {
+                        console.warn(`[startupAllWorkspaces] Zalo ${acc.zalo_id} did not connect from workspace "${ws.name}"; its saved session may need to be signed in again.`);
+                        continue;
+                    }
+                    connectedZaloIds.add(acc.zalo_id);
+                    console.log(`[startupAllWorkspaces] Connected Zalo ${acc.zalo_id} from workspace "${ws.name}"`);
+                }
+                catch (err) {
+                    console.warn(`[startupAllWorkspaces] Failed to connect ${acc.zalo_id} from "${ws.name}":`, err.message);
+                }
+            }
+        }
+        catch (err) {
+            console.warn(`[startupAllWorkspaces] Failed to load accounts from "${ws.name}":`, err.message);
+        }
+    }
+    // ── Phase 3: Connect remote/employee workspaces (Boss must be ready first) ──
+    if (remoteWorkspaces.length > 0) {
+        console.log(`[startupAllWorkspaces] Connecting ${remoteWorkspaces.length} remote workspace(s)...`);
+        await HttpConnectionManager_1.default.getInstance().connectAutoWorkspaces();
+    }
+    HttpConnectionManager_1.default.getInstance().startHealthCheck(60000);
+}
+electron_1.app.whenReady().then(async () => {
+    // A resume wakes the Electron main process and background sync services, but
+    // Chromium's requests to Vite can remain suspended. The blank screen in dev
+    // is therefore a renderer recovery problem, not a stopped message listener.
+    electron_1.powerMonitor.on('suspend', () => {
+        if (isDev) {
+            devRendererSystemSuspended = true;
+            console.log('[main] System suspend detected; monitoring Vite renderer on resume');
+        }
+    });
+    electron_1.powerMonitor.on('resume', () => {
+        if (!isDev)
+            return;
+        devRendererSystemSuspended = false;
+        if (!devRendererSuspended) {
+            console.log('[main] System resume detected; Vite renderer was healthy, no reload needed');
+            return;
+        }
+        devRendererReloadAttempts = 0;
+        // Let Vite's Node process and Windows loopback socket resume first.
+        console.log('[main] System resume detected; checking Vite renderer in 1500ms');
+        loadDevRenderer(devRendererSuspended ? 'system resume after suspended request' : 'system resume', 1500);
+    });
+    // ── Register local-media:// protocol handler ───────────────────────────
+    // Supports Range requests for video/audio streaming (seeking, partial load)
+    electron_1.protocol.handle('local-media', (request) => {
+        try {
+            let filePath = decodeURIComponent(new URL(request.url).pathname);
+            // Windows: strip leading slash → "D:/..." or "media/..."
+            if (process.platform === 'win32' && filePath.startsWith('/')) {
+                filePath = filePath.slice(1);
+            }
+            const configFolder = path.dirname(FileStorageService_1.default.getBaseDir());
+            // console.log(`[local-media] Request: url=${request.url} → filePath=${filePath} configFolder=${configFolder}`);
+            if (!path.isAbsolute(filePath)) {
+                // Relative path: "media/zaloId/date/img.jpg" → configFolder/media/zaloId/...
+                filePath = path.join(configFolder, filePath);
+                // console.log(`[local-media] Resolved relative → ${filePath}`);
+            }
+            else if (!fs.existsSync(filePath)) {
+                // Absolute path but file not found (old drive/folder after move).
+                const normalized = filePath.replace(/\\/g, '/');
+                const mediaIdx = normalized.lastIndexOf('/media/');
+                if (mediaIdx >= 0) {
+                    const relativePart = normalized.slice(mediaIdx + 1); // "media/zaloId/..."
+                    filePath = path.join(configFolder, relativePart);
+                }
+            }
+            if (!fs.existsSync(filePath)) {
+                // Fallback: file might be missing extension (DB migration bug)
+                // Try common extensions: .jpg, .png, .webp, .mp4, .ogg, .mp3
+                const exts = ['.jpg', '.png', '.webp', '.mp4', '.ogg', '.mp3'];
+                const dir = path.dirname(filePath);
+                const base = path.basename(filePath);
+                for (const ext of exts) {
+                    const candidate = path.join(dir, base + ext);
+                    if (fs.existsSync(candidate)) {
+                        // console.log(`[local-media] Found with extension: ${candidate}`);
+                        filePath = candidate;
+                        break;
+                    }
+                }
+            }
+            if (!fs.existsSync(filePath)) {
+                // Fallback: check old Telegram media location (userData/telegram_media/)
+                const basename = path.basename(filePath);
+                const oldTelegramPath = path.join(electron_1.app.getPath('userData'), 'telegram_media', basename);
+                if (fs.existsSync(oldTelegramPath)) {
+                    filePath = oldTelegramPath;
+                }
+            }
+            if (!fs.existsSync(filePath)) {
+                // A stale DB reference is expected after media cleanup or moving the
+                // storage folder. Return 404 for the renderer fallback without flooding
+                // the Electron log once per visible avatar/message.
+                // console.warn(`[local-media] NOT FOUND: ${filePath} (original request: ${request.url})`);
+                return new Response('Not Found', { status: 404 });
+            }
+            // console.log(`[local-media] Serving: ${filePath}`);
+            const absPath = path.resolve(filePath);
+            const stat = fs.statSync(absPath);
+            const fileSize = stat.size;
+            const ext = path.extname(absPath).toLowerCase();
+            // ── Debug: check file header for MP4 validity ──
+            if (ext === '.mp4' || ext === '.webm' || ext === '.mov') {
+                try {
+                    const headerBuf = Buffer.alloc(32);
+                    const fd = fs.openSync(absPath, 'r');
+                    fs.readSync(fd, headerBuf, 0, 32, 0);
+                    fs.closeSync(fd);
+                    // Check MP4 ftyp box: bytes 4-7 should be 'ftyp'
+                    const boxSize = headerBuf.readUInt32BE(0);
+                    const boxType = headerBuf.toString('ascii', 4, 8);
+                    const brand = headerBuf.toString('ascii', 8, 12);
+                    // console.log(`[local-media] File header: size=${fileSize} bytes, box=${boxType}, brand=${brand}, boxSize=${boxSize}`);
+                    // Check for HEVC brand
+                    if (brand.includes('hvc1') || brand.includes('hev1')) {
+                        console.warn(`[local-media] WARNING: HEVC/H.265 codec detected (brand=${brand}) - may not play in Chromium!`);
+                    }
+                    // Scan for moov atom position (critical for <video> playback)
+                    // moov should be before mdat for faststart, otherwise <video> can't read metadata
+                    try {
+                        const scanBuf = Buffer.alloc(Math.min(fileSize, 64 * 1024)); // scan first 64KB
+                        const fdScan = fs.openSync(absPath, 'r');
+                        fs.readSync(fdScan, scanBuf, 0, scanBuf.length, 0);
+                        fs.closeSync(fdScan);
+                        let moovOffset = -1;
+                        let mdatOffset = -1;
+                        let offset = 0;
+                        while (offset < scanBuf.length - 8) {
+                            const boxSize = scanBuf.readUInt32BE(offset);
+                            const boxType = scanBuf.toString('ascii', offset + 4, offset + 8);
+                            if (boxType === 'moov') {
+                                moovOffset = offset;
+                                break;
+                            }
+                            if (boxType === 'mdat') {
+                                mdatOffset = offset;
+                            }
+                            if (boxSize < 8)
+                                break; // invalid box
+                            offset += boxSize;
+                        }
+                        if (moovOffset >= 0) {
+                            // console.log(`[local-media] moov atom found at offset ${moovOffset} (faststart OK)`);
+                        }
+                        else {
+                            console.warn(`[local-media] WARNING: moov atom NOT found in first 64KB! File is NOT faststart.`);
+                            console.warn(`[local-media] <video> will fail to read metadata. Need to transcode with: ffmpeg -i input.mp4 -c copy -movflags +faststart output.mp4`);
+                        }
+                        if (mdatOffset >= 0) {
+                            // console.log(`[local-media] mdat atom found at offset ${mdatOffset}`);
+                        }
+                    }
+                    catch (e2) {
+                        console.warn(`[local-media] Could not scan for moov: ${e2.message}`);
+                    }
+                }
+                catch (e) {
+                    console.warn(`[local-media] Could not read header: ${e.message}`);
+                }
+            }
+            const mimeTypes = {
+                '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime',
+                '.mkv': 'video/x-matroska', '.avi': 'video/x-msvideo',
+                '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.m4a': 'audio/mp4',
+                '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+                '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+            };
+            const contentType = mimeTypes[ext] || 'application/octet-stream';
+            // ── Range request support (needed for <video> seeking/streaming) ──
+            const rangeHeader = request.headers.get('range');
+            const corsHeaders = {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+                'Access-Control-Allow-Headers': 'Range',
+                'Access-Control-Expose-Headers': 'Content-Range, Content-Length, Accept-Ranges',
+            };
+            // Handle CORS preflight
+            if (request.method === 'OPTIONS') {
+                return new Response(null, { status: 204, headers: corsHeaders });
+            }
+            if (rangeHeader) {
+                // Parse "bytes=start-end" or "bytes=start-"
+                const match = rangeHeader.match(/bytes=(\d*)-(\d*)/);
+                if (match) {
+                    const start = match[1] ? parseInt(match[1], 10) : 0;
+                    const end = match[2] ? parseInt(match[2], 10) : fileSize - 1;
+                    const chunkSize = end - start + 1;
+                    // console.log(`[local-media] Range request: bytes=${start}-${end}/${fileSize} (chunk=${chunkSize})`);
+                    // Use readFileSync + subarray for maximum compatibility with <video> element
+                    const fullData = fs.readFileSync(absPath);
+                    const chunk = fullData.subarray(start, end + 1);
+                    return new Response(chunk, {
+                        status: 206,
+                        headers: {
+                            'Content-Type': contentType,
+                            'Content-Length': String(chunkSize),
+                            'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+                            'Accept-Ranges': 'bytes',
+                            ...corsHeaders,
+                        },
+                    });
+                }
+            }
+            // ── Full file response (no Range header) ──
+            const data = fs.readFileSync(absPath);
+            const body = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+            return new Response(body, {
+                status: 200,
+                headers: {
+                    'Content-Type': contentType,
+                    'Content-Length': String(fileSize),
+                    'Accept-Ranges': 'bytes',
+                    ...corsHeaders,
+                },
+            });
+        }
+        catch (err) {
+            console.error('[local-media] Protocol handler error:', err.message);
+            return new Response('Internal Error', { status: 500 });
+        }
+    });
+    // Initialize workspace manager (must be BEFORE database init)
+    WorkspaceManager_1.default.getInstance().initialize();
+    // Initialize database
+    await DatabaseService_1.default.getInstance().initialize();
+    // ── Migrate absolute local_paths → relative ──────────────────────────────
+    // Defer this compatibility work until the renderer has had time to paint.
+    // DatabaseService records completion, so it never scans the message table on
+    // every app launch again.
+    let startupPathMigrationScheduled = false;
+    const runStartupPathMigration = () => {
+        if (startupPathMigrationScheduled)
+            return;
+        startupPathMigrationScheduled = true;
+        setTimeout(() => {
+            try {
+                const migrated = DatabaseService_1.default.getInstance().migrateAllAbsolutePathsToRelative();
+                if (migrated > 0) {
+                    console.log(`[main] Startup migration: converted ${migrated} message(s) to relative paths`);
+                }
+            }
+            catch (e) {
+                console.warn(`[main] Startup path migration failed: ${e.message}`);
+            }
+        }, 30000).unref();
+    };
+    // ── Anti-debug: kiểm tra debugger attach (chỉ production/staging) ──────────
+    if (!isDev) {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const inspector = require('inspector');
+        if (inspector.url()) {
+            electron_1.app.quit();
+            process.exit(1);
+        }
+        setInterval(() => {
+            if (inspector.url()) {
+                electron_1.app.quit();
+            }
+        }, 30000);
+    }
+    loadIcons();
+    // ── Register deplao:// as default protocol client ─────────────────────
+    // Cho phép OS mở app khi click link deplao:// trong trình duyệt
+    //
+    // ⚠️ Production: app đã đóng gói → setAsDefaultProtocolClient hoạt động đúng.
+    // ⚠️ Development: KHÔNG gọi setAsDefaultProtocolClient - dùng manual reg script
+    //    (xem hướng dẫn trong agents/references/deep-link-feature.md)
+    if (electron_1.app.isPackaged) {
+        if (!electron_1.app.isDefaultProtocolClient('lushcake')) {
+            electron_1.app.setAsDefaultProtocolClient('lushcake');
+        }
+        if (!electron_1.app.isDefaultProtocolClient('deplao')) {
+            electron_1.app.setAsDefaultProtocolClient('deplao');
+        }
+    }
+    createWindow();
+    createTray();
+    registerWindowControls();
+    // `ready-to-show` is a Chromium paint signal, not proof that React has
+    // mounted. Start network recovery only after the renderer itself reports a
+    // committed frame, otherwise a slow cold Vite load competes with Telegram,
+    // Zalo and Facebook recovery on the main process.
+    electron_1.ipcMain.on('app:rendererReady', (event) => {
+        if (event.sender !== mainWindow?.webContents)
+            return;
+        rendererReportedReady = true;
+        console.log('[main] Renderer app mounted');
+        onRendererReportedReady?.();
+    });
+    // ── Handle deep link từ initial launch (first instance) ──────────
+    // Khi click deplao:// link lần đầu:
+    //   - Production đúng: URL nằm ở process.argv[1] hoặc sau dấu `--`
+    //   - Dev / sai config: Electron nhận URL ở argv[1] thay vì main script path
+    const initialDeepLink = process.argv.find((arg) => arg.startsWith('deplao://'));
+    if (initialDeepLink) {
+        setTimeout(() => handleDeepLink(initialDeepLink), 3000);
+    }
+    // Register all IPC handlers
+    (0, loginIpc_1.registerLoginIpc)(mainWindow);
+    (0, zaloIpc_1.registerZaloIpc)();
+    (0, databaseIpc_1.registerDatabaseIpc)();
+    (0, fileIpc_1.registerFileIpc)();
+    (0, crmIpc_1.registerCRMIpc)();
+    (0, workflowIpc_1.registerWorkflowIpc)();
+    (0, integrationIpc_1.registerIntegrationIpc)();
+    (0, aiAssistantIpc_1.registerAIAssistantIpc)();
+    (0, utilIpc_1.registerUtilIpc)();
+    (0, employeeIpc_1.registerEmployeeIpc)();
+    (0, relayIpc_1.registerRelayIpc)();
+    (0, workspaceIpc_1.registerWorkspaceIpc)(mainWindow);
+    (0, facebookIpc_1.registerFacebookIpc)();
+    (0, telegramIpc_1.registerTelegramIpc)();
+    (0, telegramUserIpc_1.registerTelegramUserIpc)();
+    (0, proxyIpc_1.registerProxyIpc)();
+    (0, erpTaskIpc_1.registerErpTaskIpc)();
+    (0, erpCalendarIpc_1.registerErpCalendarIpc)();
+    (0, erpNoteIpc_1.registerErpNoteIpc)();
+    (0, erpNotificationIpc_1.registerErpNotificationIpc)();
+    (0, erpHrmIpc_1.registerErpHrmIpc)();
+    (0, lockScreenIpc_1.registerLockScreenIpc)();
+    (0, libraryIpc_1.registerLibraryIpc)();
+    // Show the renderer before starting network listeners. At startup this account
+    // can have a large Telegram recovery queue and a Zalo WebSocket login; doing
+    // both while Chromium is still loading leaves the window hidden and makes the
+    // app appear stuck even though the main process is busy.
+    let connectorStartupStarted = false;
+    const startConnectorServices = () => {
+        if (connectorStartupStarted)
+            return;
+        connectorStartupStarted = true;
+        console.log('[main] Renderer visible; starting channel connectors');
+        (0, facebookIpc_1.reconnectAllFBAccounts)().catch(err => {
+            console.error('[main] reconnectAllFBAccounts error:', err.message);
+        });
+        reconnectAllTelegramAccounts().catch(err => {
+            console.error('[main] reconnectAllTelegramAccounts error:', err.message);
+        });
+        startTelegramBotHealthCheck();
+        // Ordered startup: relay + Zalo for local workspaces, then remote workspaces.
+        setTimeout(() => startupAllWorkspaces().catch(err => {
+            console.error('[main] startupAllWorkspaces error:', err.message);
+        }), 500);
+    };
+    onRendererReportedReady = () => {
+        startConnectorServices();
+        runStartupPathMigration();
+    };
+    if (rendererReportedReady)
+        onRendererReportedReady();
+    // Keep a late fallback for a broken renderer, but give the renderer enough
+    // time to recover first. Starting all listeners at 8 seconds kept a blank
+    // window busy with recovery work and obscured the actual renderer failure.
+    setTimeout(() => {
+        if (!connectorStartupStarted) {
+            console.warn('[main] Connector startup fallback: renderer did not report ready');
+            startConnectorServices();
+            runStartupPathMigration();
+        }
+    }, 30000).unref();
+    // Resume any active CRM campaigns after restart
+    setTimeout(() => CRMQueueService_1.default.getInstance().resumeActiveCampaigns(), 3000);
+    // Initialize ERP Calendar reminders scheduler
+    setTimeout(() => {
+        try {
+            const ErpCalendarService = require('../src/services/erp/ErpCalendarService').default;
+            ErpCalendarService.getInstance().initSchedulers();
+        }
+        catch (err) {
+            console.error('[main] ErpCalendar scheduler init error:', err.message);
+        }
+    }, 3500);
+    // Initialize ERP Notification cron (due-soon + overdue)
+    setTimeout(() => {
+        try {
+            const ErpNotificationService = require('../src/services/erp/ErpNotificationService').default;
+            ErpNotificationService.getInstance().startSchedulers();
+        }
+        catch (err) {
+            console.error('[main] ErpNotification scheduler init error:', err.message);
+        }
+    }, 3700);
+    // Initialize Workflow Engine after a short delay to ensure DB is ready
+    setTimeout(() => WorkflowEngineService_1.default.getInstance().initialize(), 2000);
+    // Initialize Integration Registry
+    setTimeout(() => {
+        IntegrationRegistry_1.default.initialize();
+        // Bridge integration:payment events → workflow trigger.payment
+        EventBroadcaster_1.default.onBeforeSend('integration:payment', (data) => {
+            WorkflowEngineService_1.default.getInstance()['triggerWorkflows']('trigger.payment', data);
+        });
+    }, 2500);
+    // Initialize Webhook Gateway (port 9889)
+    setTimeout(() => {
+        WebhookGatewayService_1.default.getInstance().start().then(result => {
+            if (result.success) {
+                console.log('[main] WebhookGateway started on port ' + result.port);
+            }
+        });
+    }, 3000);
+    // Initialize Tracking Service (chỉ chạy trong production build)
+    setTimeout(() => {
+        try {
+            TrackingService_1.default.getInstance().start();
+        }
+        catch (err) {
+            console.error('[main] TrackingService init error:', err.message);
+        }
+    }, 5000);
+    // ─── Media cleanup scheduler (tự động xoá media cũ) ─────────────────────
+    // Chạy mỗi ngày lúc 3:00 sáng, kiểm tra tất cả tài khoản có cấu hình auto-delete
+    const mediaCleanupJob = cron.schedule('0 3 * * *', async () => {
+        console.log('[MediaCleanup] Running daily scheduled cleanup...');
+        try {
+            const DatabaseService = require('../src/services/database/DatabaseService').default;
+            const FileStorageService = require('../src/services/file/FileStorageService').default;
+            const db = DatabaseService.getInstance();
+            const accounts = db.getAccounts();
+            for (const acc of accounts) {
+                const config = db.getMediaAutoDeleteConfig(acc.zalo_id);
+                if (config?.enabled && config.days > 0) {
+                    const deleted = FileStorageService.cleanupOldMedia(acc.zalo_id, config.days);
+                    if (deleted > 0) {
+                        console.log(`[MediaCleanup] Cleaned ${deleted} dirs for ${acc.zalo_id}`);
+                    }
+                }
+            }
+            console.log('[MediaCleanup] Daily cleanup completed');
+        }
+        catch (err) {
+            console.error('[MediaCleanup] Error:', err.message);
+        }
+    });
+    console.log('[MediaCleanup] Scheduler initialized - runs daily at 3:00 AM');
+    // Check for updates — đợi renderer sẵn sàng rồi mới check
+    if (!isDev) {
+        electron_updater_1.autoUpdater.autoDownload = false;
+        electron_updater_1.autoUpdater.autoInstallOnAppQuit = false;
+        // Đợi renderer load xong rồi mới check update (tránh race condition)
+        // IPC: renderer báo đã sẵn sàng nhận update events
+        electron_1.ipcMain.once('update:renderer-ready', () => {
+            console.log('[AutoUpdate] Renderer ready — checking for updates');
+            electron_updater_1.autoUpdater.checkForUpdates();
+        });
+        // Fallback: nếu renderer không báo sau 10s, tự check
+        setTimeout(() => {
+            electron_updater_1.autoUpdater.checkForUpdates();
+        }, 10000);
+        setInterval(() => electron_updater_1.autoUpdater.checkForUpdates(), 4 * 60 * 60 * 1000);
+        electron_updater_1.autoUpdater.on('update-available', (info) => {
+            mainWindow?.webContents.send('update:available', {
+                version: info.version,
+                releaseNotes: info.releaseNotes,
+            });
+        });
+        electron_updater_1.autoUpdater.on('download-progress', (progress) => {
+            mainWindow?.webContents.send('update:progress', {
+                percent: Math.round(progress.percent),
+                bytesPerSecond: progress.bytesPerSecond,
+                total: progress.total,
+                transferred: progress.transferred,
+            });
+        });
+        electron_updater_1.autoUpdater.on('update-downloaded', (info) => {
+            mainWindow?.webContents.send('update:downloaded', {
+                version: info.version,
+            });
+        });
+        electron_updater_1.autoUpdater.on('update-not-available', () => {
+            mainWindow?.webContents.send('update:not-available');
+        });
+        electron_updater_1.autoUpdater.on('error', (err) => {
+            console.error('[AutoUpdate] Error:', err.message);
+            mainWindow?.webContents.send('update:error', {
+                message: err.message,
+                platform: process.platform,
+            });
+        });
+    }
+    // IPC từ renderer: trigger check for update
+    electron_1.ipcMain.on('update:check', () => {
+        if (!isDev)
+            electron_updater_1.autoUpdater.checkForUpdates();
+    });
+    // IPC từ renderer: trigger download (user confirmed)
+    electron_1.ipcMain.on('update:download', () => {
+        if (!isDev)
+            electron_updater_1.autoUpdater.downloadUpdate();
+    });
+    // IPC từ renderer: install và restart
+    electron_1.ipcMain.on('update:install', () => {
+        if (!isDev)
+            electron_updater_1.autoUpdater.quitAndInstall(false, true);
+    });
+});
+electron_1.app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') {
+        electron_1.app.quit();
+        setTimeout(() => {
+            console.warn('[main] Force-exit after 5s timeout (window-all-closed)');
+            process.exit(0);
+        }, 5000).unref();
+    }
+});
+electron_1.app.on('activate', () => {
+    if (mainWindow === null)
+        createWindow();
+    else {
+        mainWindow.show();
+        mainWindow.focus();
+    }
+});
+electron_1.app.on('before-quit', () => {
+    isQuitting = true;
+    // ── Cleanup background services giữ event loop ──────────────────────
+    // Nếu không dọn, CRM timers / cron / webhook server giữ process sống,
+    // app "tắt" rồi nhưng vẫn chạy ngầm trong Task Manager.
+    try {
+        // Dừng tất cả CRM queue timers
+        const crmTimers = CRMQueueService_1.default.getInstance();
+        if (crmTimers?.timers) {
+            for (const [zaloId, timer] of crmTimers.timers) {
+                clearInterval(timer);
+            }
+            crmTimers.timers.clear();
+        }
+    }
+    catch { }
+    try {
+        // Dừng tất cả workflow cron jobs
+        const wfe = WorkflowEngineService_1.default.getInstance();
+        if (wfe?.cronJobs) {
+            for (const [, job] of wfe.cronJobs) {
+                try {
+                    job.stop();
+                }
+                catch { }
+            }
+            wfe.cronJobs.clear();
+        }
+    }
+    catch { }
+    try {
+        // Dừng webhook HTTP server
+        IntegrationRegistry_1.default.stopWebhookServer();
+    }
+    catch { }
+    try {
+        // Dừng webhook gateway
+        WebhookGatewayService_1.default.getInstance().stop();
+    }
+    catch { }
+    try {
+        // Close DB completely — releases file handles so NSIS installer can update safely.
+        // forceFlush() only does WAL checkpoint; close() also releases locks on .db/.wal/.shm.
+        DatabaseService_1.default.getInstance().close();
+    }
+    catch { }
+    try {
+        // Disconnect all workspace socket connections
+        HttpConnectionManager_1.default.getInstance().disconnectAll();
+    }
+    catch { }
+    try {
+        // Stop all Telegram Bot polling and User listeners
+        const { stopAllBots } = require('../src/services/telegram/TelegramBotChannelService');
+        stopAllBots();
+    }
+    catch { }
+    try {
+        const { stopAllListeners } = require('../src/services/telegram/TelegramUserListener');
+        stopAllListeners();
+    }
+    catch { }
+    try {
+        const { stopAllPollers } = require('../src/services/workflow/TelegramBotPollingService');
+        stopAllPollers();
+    }
+    catch { }
+});
+// ─── Last-resort: ensure DB is closed before process exits ──────────────────
+// Covers edge cases where before-quit didn't fire (e.g. process.kill, NSIS force-quit)
+electron_1.app.on('will-quit', () => {
+    try {
+        DatabaseService_1.default.getInstance().close();
+    }
+    catch { }
+});
+// ─── Global error handlers ──────────────────────────────────────────────────
+// Không có handlers → unhandled error trong main process = treo im lặng,
+// app chạy ngầm mà renderer đã chết → user thấy trắng / không hiển thị gì.
+process.on('uncaughtException', (error) => {
+    console.error('[main] Uncaught exception:', error);
+    // Không crash app - log rồi tiếp tục
+});
+process.on('unhandledRejection', (reason) => {
+    console.error('[main] Unhandled rejection:', reason);
+});
+//# sourceMappingURL=main.js.map
