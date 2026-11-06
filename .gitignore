@@ -1,4 +1,5 @@
 node_modules/
+mobile/dist/
 # dist/ and dist-electron/ are prebuilt bundles required for packaging
 dist-electron-build/
 agents/

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">LushCake</string>
+    <string name="title_activity_main">LushCake</string>
+    <string name="package_name">com.lushcake.mobile</string>
+    <string name="custom_url_scheme">com.lushcake.mobile</string>
+</resources>
