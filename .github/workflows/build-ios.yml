@@ -11,7 +11,7 @@ on:
 
 jobs:
   build-ios:
-    runs-on: macos-14  # Máy ảo Mac của GitHub có sẵn Xcode
+    runs-on: macos-latest  # Máy ảo Mac của GitHub có sẵn Xcode
     timeout-minutes: 30
 
     steps:
