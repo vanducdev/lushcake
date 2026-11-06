@@ -11,7 +11,7 @@ on:
 
 jobs:
   build-ios:
-    runs-on: macos-latest  # Máy ảo Mac của GitHub có sẵn Xcode
+    runs-on: macos-latest
     timeout-minutes: 30
 
     steps:
@@ -51,12 +51,12 @@ jobs:
           cd mobile/ios/App/build/App.xcarchive/Products/Applications
           mkdir -p Payload
           cp -r App.app Payload/
-          zip -r -q ../../../../../LushCake.ipa Payload
-          echo "✅ LushCake.ipa created successfully!"
+          zip -r -q "$GITHUB_WORKSPACE/LushCake.ipa" Payload
+          echo "✅ LushCake.ipa created at $GITHUB_WORKSPACE/LushCake.ipa"
 
       - name: 📤 Upload IPA as Artifact
         uses: actions/upload-artifact@v4
         with:
           name: LushCake-iOS-IPA
-          path: mobile/LushCake.ipa
+          path: LushCake.ipa
           if-no-files-found: error
