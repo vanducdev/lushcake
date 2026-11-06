@@ -1,0 +1,62 @@
+name: Build iOS (IPA)
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*-mobile*'
+
+jobs:
+  build-ios:
+    runs-on: macos-14  # Máy ảo Mac của GitHub có sẵn Xcode
+    timeout-minutes: 30
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js 22.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'mobile/package-lock.json'
+
+      - name: 📦 Install Mobile dependencies & Build
+        run: |
+          cd mobile
+          npm install --legacy-peer-deps
+          npm run build
+          npx cap sync ios
+
+      - name: 🏗️ Build iOS App (Archive)
+        run: |
+          cd mobile/ios/App
+          xcodebuild clean archive \
+            -workspace App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/App.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE_SPECIFIER=""
+
+      - name: 📦 Package into .ipa
+        run: |
+          cd mobile/ios/App/build/App.xcarchive/Products/Applications
+          mkdir -p Payload
+          cp -r App.app Payload/
+          zip -r -q ../../../../../LushCake.ipa Payload
+          echo "✅ LushCake.ipa created successfully!"
+
+      - name: 📤 Upload IPA as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LushCake-iOS-IPA
+          path: mobile/LushCake.ipa
+          if-no-files-found: error
