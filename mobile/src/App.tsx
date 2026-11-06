@@ -6,6 +6,7 @@ import { ChatList } from './components/ChatList';
 import { ChatDetail } from './components/ChatDetail';
 import { AccountList } from './components/AccountList';
 import { CrmView } from './components/CrmView';
+import { AiAssistantView } from './components/AiAssistantView';
 import { SettingsView } from './components/SettingsView';
 
 export const App: React.FC = () => {
@@ -20,6 +21,7 @@ export const App: React.FC = () => {
       <main className="flex-1 overflow-y-auto">
         {activeTab === 'messages' && <ChatList />}
         {activeTab === 'crm' && <CrmView />}
+        {activeTab === 'ai' && <AiAssistantView />}
         {activeTab === 'accounts' && <AccountList />}
         {activeTab === 'settings' && <SettingsView />}
       </main>
